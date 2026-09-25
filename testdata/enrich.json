@@ -1,6 +1,8 @@
 {
   "output": "build/smoke/from-cli.thrt",
-  "layers": [
-    {"layer": "cti", "files": ["testdata/one.csv"]}
+  "feeds": [
+    {"name": "public-csv", "type": "csv", "layer": "cti", "path": "testdata/one.csv"},
+    {"name": "lab-misp", "type": "misp", "layer": "cti", "path": "testdata/one.misp.json"},
+    {"name": "cmdb", "type": "tags", "layer": "tags", "path": "testdata/cmdb.tags"}
   ]
 }

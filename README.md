@@ -8,10 +8,22 @@ are header-only. `libenrich.so` exports `enrich_version()` so a package
 can pin the SONAME. The builders are `thrtutil`, `thrt_cli`,
 `overlay_tool` (needs libfastjson), and `prev_lookup`.
 
-`enrich build` calls `thrtutil`. `enrich apply-delta` folds one segment.
-`enrich fetch` downloads GeoIP (MaxMind) and any plain `files` entries
-such as `ua.json` or `tld.json`. Those are not formats this library
-builds. `mmenrich` keeps using libmaxminddb for the `.mmdb`.
+`enrich build` calls `thrtutil` for every local feed, and `overlay_tool`
+when an overlay feed is set. `enrich fetch` downloads the remote ones.
+`enrich run` fetches, then builds. `enrich apply-delta` folds one
+segment into the `.thrt`.
+
+| mmenrich parameter | CLI feed `type` | What it is |
+|---|---|---|
+| `file` | `csv`, `json`, `lookup`, `txt`, `ioc`, `misp` | Public or restricted CTI compiled into `threat.thrt`. `layer` is `cti` or `cti_r`. A `misp` feed with `url` is fetched from `/attributes/restSearch` first. |
+| `file` | `tags` | Context: asset, CMDB, cartography. Same `.thrt`, layer `tags`. |
+| `overlay_file` | `overlay` | `.ovly` whitelist / tag / add list. Needs `make overlay`. |
+| `geoip_db`, `geoip_asn_db` | `geoip` | MaxMind `.mmdb` download. Not a format we build. |
+| `ua_file` | `ua` | `ua.json` download. |
+| `tld_file` | `tld` | `tld.json` download. |
+| `prevalence_db` | none | `.prev` is written by `waked/prev_write.py` from fleet counts. It is not an upstream feed. |
+
+`file` is one database. Several feeds of the types above are layers of that file.
 
 ```
 make
