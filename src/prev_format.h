@@ -3,9 +3,9 @@
  * A distributed "how common is this observable across the whole fleet" table:
  * the collector aggregates per-observable counts reported by every edge, writes
  * this table (Python, mirrors this layout byte-for-byte), and distributes it to
- * the edges like the .thrt CTI table. mmenrich mmaps it read-only and, per
- * event, looks up the query name / destination address and emits the fleet
- * count as a $! fact. A LOW (or absent = 0) count is the rarity signal: a domain
+ * the edges like the .thrt CTI table. The file is mmap'd read-only. Per
+ * event, look up the query name or destination address; the stored value is
+ * the fleet count. A LOW (or absent = 0) count is the rarity signal: a domain
  * or address seen almost nowhere else in the fleet is a first-seen / targeted
  * C2 rendezvous, which a Sigma rule can threshold (optionally ANDed with entropy
  * or beaconing). High counts (common CDN/SaaS) are the benign baseline.
@@ -43,10 +43,10 @@
 #define PREV_PROBE_MAX 64 /* bounded linear probe (corruption guard) */
 
 /* FNV-1a 64-bit over the observable bytes. Deliberately NOT CRC32C: prevalence
- * is one lookup per event (never the bottleneck vs mmenrich's CTI/SIMD work), so
- * a scalar hash is free, and FNV-1a is trivial to reproduce BYTE-IDENTICALLY in
- * the collector's Python writer (no CRC32C table/polynomial to match). The
- * writer and this reader MUST stay in lockstep on this function. */
+ * is one lookup per event, so a scalar hash is free, and FNV-1a is trivial to
+ * reproduce BYTE-IDENTICALLY in the collector's Python writer (no CRC32C
+ * table/polynomial to match). The writer and this reader MUST stay in
+ * lockstep on this function. */
 static inline uint64_t prev_hash(const char* s) {
     uint64_t h = 0xcbf29ce484222325ULL; /* FNV offset basis */
     for (; *s != '\0'; s++) {

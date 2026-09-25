@@ -1,5 +1,5 @@
 /* thrtutil.c
- * Standalone tool that builds the mmenrich CTI database (.thrt). Imports:
+ * Standalone tool that builds the CTI database (.thrt). Imports:
  *   - CSV (.csv)
  *   - CTI dictionary JSON (.json), multi-feed, with mmap for 1+ GB files
  *   - rsyslog JSON lookup tables (.lookup)
@@ -9,11 +9,11 @@
  *
  * Incremental updates: --apply-delta <seg> folds one CTI delta segment into the
  * live .thrt then exits (dedup by (type, value), per-feed snapshot replace,
- * feed-level TTL and generation anti-resurrection via a .gen companion file). mmenrich
- * picks up the atomic rewrite through its mtime reload.
+ * feed-level TTL and generation anti-resurrection via a .gen companion file).
+ * The rewrite is atomic. Consumers reload it when the mtime changes.
  *
- * Layers (-l cti|cti_r|tags, default cti): control how much of a match mmenrich
- * reveals. cti = public intel, fully attributed (feed/category/TLP emitted).
+ * Layers (-l cti|cti_r|tags, default cti): control how much of a match is
+ * revealed. cti = public intel, fully attributed (feed/category/TLP emitted).
  * cti_r = restricted intel: a match raises the threat flag but feed/category/TLP
  * are withheld from the message. tags = asset/CMDB/carto context, no threat flag.
  * Supports per-feed bitmasks (up to 64 feeds), pre-computed TLP masks and tags

@@ -1,5 +1,5 @@
 /* thrt_format.h
- * On-disk binary layout of the mmenrich CTI database (.thrt). Structures are
+ * On-disk binary layout of the CTI database (.thrt). Structures are
  * 8-byte aligned for safe 64-bit access on all platforms. Carries per-entry
  * type, feed, TLP and category bitmasks plus a tags-JSON string pool and a
  * feed-name table in the header.

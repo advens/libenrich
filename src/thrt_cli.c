@@ -1,5 +1,5 @@
 /* thrt_cli.c
- * Standalone command-line tool to query and inspect an mmenrich CTI database
+ * Standalone command-line tool to query and inspect a CTI database
  * (.thrt) and perform maintenance operations on it.
  *
  * Usage:   ./thrt_cli <db_file> <ip_or_domain>

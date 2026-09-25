@@ -1,5 +1,5 @@
 /* overlay_tool.c
- * Build and query an mmenrich CTI overlay (.ovly).
+ * Build and query a CTI overlay (.ovly).
  *
  * Usage:
  *   overlay_tool lookup <file.ovly> <ioc>

@@ -1,4 +1,4 @@
-# libenrich: feed formats and the central builders mmenrich reads.
+# libenrich: feed formats and the builders that produce them.
 #
 #   make           library, pkg-config, thrtutil, thrt_cli, prev_lookup
 #   make test      ip parse, prevalence lookup, one-row .thrt, enrich build

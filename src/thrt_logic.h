@@ -1,5 +1,5 @@
 /* thrt_logic.h
- * Shared lookup logic and hardware-accelerated CRC32C helpers for the mmenrich
+ * Shared lookup logic and hardware-accelerated CRC32C helpers for the
  * CTI database (.thrt). Enables the hardware CRC32C path on __SSE4_2__ (x86-64)
  * and __ARM_FEATURE_CRC32 (arm64), with a scalar fallback otherwise.
  *
@@ -106,10 +106,10 @@ static inline uint32_t crc32c_platform(uint32_t crc, const void* data, size_t le
     // throughput. Genuinely scalar-only targets stay quiet.
     #if defined(__x86_64__) || defined(_M_X64)
         #warning \
-            "mmenrich: hardware CRC32C disabled, using the scalar fallback (slow). Build with -msse4.2 (or -march=x86-64-v2 or newer) to enable it."
+            "enrich: hardware CRC32C disabled, using the scalar fallback (slow). Build with -msse4.2 (or -march=x86-64-v2 or newer) to enable it."
     #elif defined(__aarch64__) || defined(_M_ARM64)
         #warning \
-            "mmenrich: hardware CRC32C disabled, using the scalar fallback (slow). Build with -march=armv8-a+crc (or a -mcpu that implies +crc) to enable it."
+            "enrich: hardware CRC32C disabled, using the scalar fallback (slow). Build with -march=armv8-a+crc (or a -mcpu that implies +crc) to enable it."
     #endif
 static inline uint32_t crc32c_platform(uint32_t crc, const void* data, size_t len) {
     const uint8_t* p = (const uint8_t*)data;
