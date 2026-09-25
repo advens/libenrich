@@ -1,47 +1,84 @@
 # libenrich
 
-Formats and builders for the files `mmenrich` reads. The central `enrich`
-command builds those files. Copying them onto edges is a separate step.
-
-The on-disk formats (`.thrt`, `.ovly`, `.prev`) and their lookup helpers
-are header-only. `libenrich.so` exports `enrich_version()` so a package
-can pin the SONAME. The only command is `enrich`.
-
-`enrich build` writes `threat.thrt` and any overlay. `enrich fetch`
-downloads GeoIP, MISP, `ua.json`, and `tld.json`. `enrich run` fetches,
-then builds. `enrich lookup` queries the `.thrt`. `enrich apply-delta`
-folds one segment.
-
-| mmenrich parameter | CLI feed `type` | What it is |
-|---|---|---|
-| `file` | `csv`, `json`, `lookup`, `txt`, `ioc`, `misp` | Public or restricted CTI compiled into `threat.thrt`. `layer` is `cti` or `cti_r`. A `misp` feed with `url` is fetched from `/attributes/restSearch` first. |
-| `file` | `tags` | Context: asset, CMDB, cartography. Same `.thrt`, layer `tags`. |
-| `overlay_file` | `overlay` | `.ovly` whitelist / tag / add list. |
-| `geoip_db`, `geoip_asn_db` | `geoip` | MaxMind `.mmdb` download. Not a format we build. |
-| `ua_file` | `ua` | `ua.json` download. |
-| `tld_file` | `tld` | `tld.json` download. |
-| `prevalence_db` | none | `.prev` is written by `waked/prev_write.py` from fleet counts. It is not an upstream feed. |
-
-`file` is one database. Several feeds of the types above are layers of that file.
+Build the files a log enricher reads: one threat database, an overlay,
+GeoIP databases, a user-agent table, and a public-suffix table.
 
 ```
 make
 make test
 make install PREFIX=/usr/local
-enrich -c /etc/enrich.json run
 ```
 
-There is one command, `enrich`. It builds the `.thrt`, writes the overlay,
-downloads GeoIP, MISP, `ua.json`, and `tld.json`, and looks an indicator up.
-`libfastjson` is required.
+`libfastjson` is required (`pkg-config libfastjson`).
 
-Credentials and URLs are fields of that config file. `-c` selects it.
+## One command
+
+```
+enrich -c /etc/enrich.json fetch
+enrich -c /etc/enrich.json build
+enrich -c /etc/enrich.json run
+enrich -c /etc/enrich.json lookup 203.0.113.7
+enrich -c /etc/enrich.json apply-delta --segment /var/lib/enrich/delta.csv \
+    --feed-key public --snapshot --ttl-days 30 --generation 2
+```
+
+`fetch` downloads GeoIP, MISP, the user-agent table, and the public-suffix
+table. `build` compiles `threat.thrt` and the overlay. `run` is fetch,
+then build. `lookup` queries the database named by `output`.
+`apply-delta` folds one segment into that database.
+
 With no `-c`, `enrich` reads `./enrich.json`, then `/etc/enrich.json`.
-Keep the file mode `0600`. `enrich.json.example` shows the fields.
-`geoip.account_id`, `geoip.license_key`, each `misp` feed's `url` and
-`key`, and each `ua` / `tld` feed's `url` are all in that file.
+Keep the file mode `0600`. Account ids, license keys, and tokens are
+fields in that file. They are not environment variables.
 
-MarlinOS links this library from `mmenrich` the way `mmsigma` links
-`libsigma`. An upstream rsyslog tree vendors the headers and builders
-next to the module. Until that cut, the rsyslog port still carries its
-own copy of these sources.
+`thrtutil` is the same builder, installed for callers that already pass
+`thrtutil` arguments (`-o`, `-l`, `--apply-delta`). New use is `enrich`.
+
+A GeoIP `fetch` downloads the edition checksum every time. The archive
+is skipped when that checksum matches the local database.
+
+## Config
+
+```json
+{
+  "output": "/var/lib/enrich/threat.thrt",
+  "geoip": {
+    "account_id": "",
+    "license_key": "",
+    "dest_dir": "/var/lib/enrich",
+    "editions": ["GeoLite2-City", "GeoLite2-ASN"]
+  },
+  "feeds": [
+    {"name": "public-csv", "type": "csv", "layer": "cti", "path": "/var/lib/enrich/public.csv"},
+    {"name": "public-json", "type": "json", "layer": "cti", "path": "/var/lib/enrich/cti.json"},
+    {"name": "lookup", "type": "lookup", "layer": "cti", "path": "/var/lib/enrich/table.lookup"},
+    {"name": "plain", "type": "txt", "layer": "cti", "path": "/var/lib/enrich/iocs.txt"},
+    {"name": "ioc-list", "type": "ioc", "layer": "cti", "path": "/var/lib/enrich/iocs.ioc"},
+    {"name": "restricted", "type": "csv", "layer": "cti_r", "path": "/var/lib/enrich/restricted.csv"},
+    {"name": "misp", "type": "misp", "layer": "cti", "url": "https://misp.example", "key": "", "since": "7d", "dest": "/var/lib/enrich/misp.misp.json"},
+    {"name": "cmdb", "type": "tags", "path": "/var/lib/enrich/cmdb.tags"},
+    {"name": "cartography", "type": "tags", "path": "/var/lib/enrich/carto.tags.json"},
+    {"name": "ua", "type": "ua", "url": "https://example.invalid/ua.json", "dest": "/var/lib/enrich/ua.json"},
+    {"name": "tld", "type": "tld", "url": "https://example.invalid/tld.json", "dest": "/var/lib/enrich/tld.json"},
+    {"name": "overlay", "type": "overlay", "path": "/var/lib/enrich/allow.json", "dest": "/var/lib/enrich/allow.ovly"}
+  ]
+}
+```
+
+| Output | Feed `type` | Role |
+|---|---|---|
+| `output` (`.thrt`) | `csv`, `json`, `lookup`, `txt`, `ioc`, `misp` | Threat indicators. `layer` is `cti` or `cti_r`. A `misp` feed with `url` is fetched from `/attributes/restSearch` into `dest` before the build. |
+| same file | `tags` | Context: asset, inventory, cartography. A path ending in `.tags.json` is the JSON form. |
+| `dest` of `overlay` | `overlay` | Whitelist, tag, or add list (`.ovly`). |
+| `dest_dir`/`edition`.mmdb | `geoip` | MaxMind City and ASN databases. The checksum skips an unchanged archive. |
+| `dest` of `ua` | `ua` | User-agent table (`ua.json`). |
+| `dest` of `tld` | `tld` | Public-suffix table (`tld.json`). |
+
+Prevalence tables are not built here. They come from the counts a
+deployment already has.
+
+## Library
+
+Headers install under `include/enrich/`. `libenrich.so` exports
+`enrich_version()`. The on-disk formats are header-only. Link with
+`pkg-config enrich`.

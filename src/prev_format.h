@@ -18,7 +18,6 @@
  * the table tiny (16 B/entry) and the lookup a single cache-line probe.
  *
  * Copyright 2026 Advens.
- * Author: Jeremie Jourdin <jeremie.jourdin@advens.fr>
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.

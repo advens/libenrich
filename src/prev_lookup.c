@@ -4,7 +4,6 @@
  * Usage:   prev_lookup <file.prev> <observable>
  *
  * Copyright 2026 Advens.
- * Author: Jeremie Jourdin <jeremie.jourdin@advens.fr>
  *
  * This file is part of libenrich.
  *

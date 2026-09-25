@@ -4,7 +4,6 @@
  * and __ARM_FEATURE_CRC32 (arm64), with a scalar fallback otherwise.
  *
  * Copyright 2026 Advens.
- * Author: Jeremie Jourdin <jeremie.jourdin@advens.fr>
  *
  * This file is part of libenrich.
  *

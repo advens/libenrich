@@ -10,7 +10,6 @@
  *   [uint32_t CRC32C]           4-byte trailer
  *
  * Copyright 2026 Advens.
- * Author: Jeremie Jourdin <jeremie.jourdin@advens.fr>
  *
  * This file is part of libenrich.
  *

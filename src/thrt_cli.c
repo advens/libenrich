@@ -6,7 +6,6 @@
  * Compile: cc -O3 thrt_cli.c -o thrt_cli
  *
  * Copyright 2026 Advens.
- * Author: Jeremie Jourdin <jeremie.jourdin@advens.fr>
  *
  * This file is part of libenrich.
  *

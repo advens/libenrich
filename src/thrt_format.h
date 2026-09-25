@@ -5,7 +5,6 @@
  * feed-name table in the header.
  *
  * Copyright 2026 Advens.
- * Author: Jeremie Jourdin <jeremie.jourdin@advens.fr>
  *
  * This file is part of libenrich.
  *

@@ -60,7 +60,7 @@ CFLAGS := $(CSTD) $(WARN) $(HARDEN) $(OPT) $(ARCHFLAGS) -fPIC -I$(SRCDIR)
 
 .PHONY: all test install clean
 
-all: $(BUILDDIR)/$(SHLIB) $(BUILDDIR)/libenrich.a $(BUILDDIR)/enrich enrich.pc
+all: $(BUILDDIR)/$(SHLIB) $(BUILDDIR)/libenrich.a $(BUILDDIR)/enrich $(BUILDDIR)/thrtutil enrich.pc
 
 $(BUILDDIR):
 	mkdir -p $(BUILDDIR)
@@ -86,6 +86,9 @@ enrich.pc: enrich.pc.in
 	sed -e 's|@PREFIX@|$(PREFIX)|g' \
 	    -e 's|@VERSION@|$(LIB_MAJOR).$(LIB_MINOR).$(LIB_PATCH)|g' \
 	    enrich.pc.in > enrich.pc
+
+$(BUILDDIR)/thrtutil: $(SRCDIR)/thrtutil.c | $(BUILDDIR)
+	$(CC) $(CFLAGS) -O3 -o $@ $(SRCDIR)/thrtutil.c
 
 $(BUILDDIR)/thrtutil.o: $(SRCDIR)/thrtutil.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) -O3 -Dmain=thrtutil_main -c -o $@ $(SRCDIR)/thrtutil.c
@@ -137,7 +140,7 @@ install: all
 	cp $(SRCDIR)/enrich.h $(SRCDIR)/thrt_format.h $(SRCDIR)/thrt_logic.h \
 	   $(SRCDIR)/thrt_ipparse.h $(SRCDIR)/thrt_overlay.h $(SRCDIR)/prev_format.h \
 	   $(DESTDIR)$(PREFIX)/include/enrich/
-	cp $(BUILDDIR)/enrich $(DESTDIR)$(PREFIX)/bin/enrich
+	cp $(BUILDDIR)/enrich $(BUILDDIR)/thrtutil $(DESTDIR)$(PREFIX)/bin/
 	cp enrich.pc $(DESTDIR)$(PCDIR)/
 
 clean:
