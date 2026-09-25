@@ -16,6 +16,9 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: deps
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libfastjson-dev pkg-config
+
       - name: build and test
         run: make test
 

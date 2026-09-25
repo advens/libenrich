@@ -43,6 +43,8 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
+      - name: deps
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libfastjson-dev pkg-config
       - name: make test
         run: make test
 
@@ -50,5 +52,7 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+      - name: deps
+        run: brew install libfastjson pkg-config
       - name: make test
         run: make test

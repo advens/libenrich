@@ -1,0 +1,49 @@
+{
+  "output": "/var/lib/enrich/threat.thrt",
+  "geoip": {
+    "account_id": "",
+    "license_key": "",
+    "dest_dir": "/var/lib/enrich",
+    "editions": ["GeoLite2-City", "GeoLite2-ASN"]
+  },
+  "feeds": [
+    {
+      "name": "misp",
+      "type": "misp",
+      "url": "https://misp.example",
+      "key": "",
+      "since": "7d",
+      "dest": "/var/lib/enrich/misp.misp.json",
+      "layer": "cti"
+    },
+    {
+      "name": "public",
+      "type": "csv",
+      "layer": "cti",
+      "path": "/var/lib/enrich/public.csv"
+    },
+    {
+      "name": "cmdb",
+      "type": "tags",
+      "path": "/var/lib/enrich/cmdb.tags"
+    },
+    {
+      "name": "ua",
+      "type": "ua",
+      "url": "https://example/ua.json",
+      "dest": "/var/lib/enrich/ua.json"
+    },
+    {
+      "name": "tld",
+      "type": "tld",
+      "url": "https://example/tld.json",
+      "dest": "/var/lib/enrich/tld.json"
+    },
+    {
+      "name": "overlay",
+      "type": "overlay",
+      "path": "/var/lib/enrich/allow.json",
+      "dest": "/var/lib/enrich/allow.ovly"
+    }
+  ]
+}

@@ -58,11 +58,9 @@ SRCDIR := src
 BUILDDIR := build
 CFLAGS := $(CSTD) $(WARN) $(HARDEN) $(OPT) $(ARCHFLAGS) -fPIC -I$(SRCDIR)
 
-.PHONY: all test tools install clean overlay
+.PHONY: all test install clean
 
-all: $(BUILDDIR)/$(SHLIB) $(BUILDDIR)/libenrich.a enrich.pc tools
-
-tools: $(BUILDDIR)/thrtutil $(BUILDDIR)/thrt_cli $(BUILDDIR)/prev_lookup
+all: $(BUILDDIR)/$(SHLIB) $(BUILDDIR)/libenrich.a $(BUILDDIR)/enrich enrich.pc
 
 $(BUILDDIR):
 	mkdir -p $(BUILDDIR)
@@ -89,30 +87,39 @@ enrich.pc: enrich.pc.in
 	    -e 's|@VERSION@|$(LIB_MAJOR).$(LIB_MINOR).$(LIB_PATCH)|g' \
 	    enrich.pc.in > enrich.pc
 
-$(BUILDDIR)/thrtutil: $(SRCDIR)/thrtutil.c | $(BUILDDIR)
-	$(CC) $(CFLAGS) -O3 -o $@ $(SRCDIR)/thrtutil.c
+$(BUILDDIR)/thrtutil.o: $(SRCDIR)/thrtutil.c | $(BUILDDIR)
+	$(CC) $(CFLAGS) -O3 -Dmain=thrtutil_main -c -o $@ $(SRCDIR)/thrtutil.c
 
-$(BUILDDIR)/thrt_cli: $(SRCDIR)/thrt_cli.c | $(BUILDDIR)
-	$(CC) $(CFLAGS) -O3 -o $@ $(SRCDIR)/thrt_cli.c
+$(BUILDDIR)/thrt_cli.o: $(SRCDIR)/thrt_cli.c | $(BUILDDIR)
+	$(CC) $(CFLAGS) -O3 -Dmain=thrt_cli_main -c -o $@ $(SRCDIR)/thrt_cli.c
 
-$(BUILDDIR)/prev_lookup: $(SRCDIR)/prev_lookup.c | $(BUILDDIR)
-	$(CC) $(CFLAGS) -O3 -o $@ $(SRCDIR)/prev_lookup.c
+$(BUILDDIR)/prev_lookup.o: $(SRCDIR)/prev_lookup.c | $(BUILDDIR)
+	$(CC) $(CFLAGS) -O3 -Dmain=prev_lookup_main -c -o $@ $(SRCDIR)/prev_lookup.c
 
-overlay: $(BUILDDIR)/overlay_tool
+$(BUILDDIR)/overlay_tool.o: $(SRCDIR)/overlay_tool.c | $(BUILDDIR)
+	@test -n "$(JSON_LIBS)" || { echo "libfastjson is required" >&2; exit 1; }
+	$(CC) $(CFLAGS) $(JSON_CFLAGS) -O3 -Dmain=overlay_tool_main -c -o $@ $(SRCDIR)/overlay_tool.c
 
-$(BUILDDIR)/overlay_tool: $(SRCDIR)/overlay_tool.c | $(BUILDDIR)
-	@test -n "$(JSON_LIBS)" || { echo "libfastjson not found; overlay_tool skipped" >&2; exit 1; }
-	$(CC) $(CFLAGS) $(JSON_CFLAGS) -O3 -o $@ $(SRCDIR)/overlay_tool.c $(JSON_LIBS)
+$(BUILDDIR)/enrich_cmd.o: $(SRCDIR)/enrich_cmd.c | $(BUILDDIR)
+	@test -n "$(JSON_LIBS)" || { echo "libfastjson is required" >&2; exit 1; }
+	$(CC) $(CFLAGS) $(JSON_CFLAGS) -c -o $@ $(SRCDIR)/enrich_cmd.c
 
-test: $(BUILDDIR)/$(SHLIB) tools $(BUILDDIR)/test_thrt_ipparse $(BUILDDIR)/test_prev
+$(BUILDDIR)/enrich: $(BUILDDIR)/enrich_cmd.o $(BUILDDIR)/enrich_version.o \
+		$(BUILDDIR)/thrtutil.o $(BUILDDIR)/thrt_cli.o \
+		$(BUILDDIR)/overlay_tool.o $(BUILDDIR)/prev_lookup.o
+	$(CC) -o $@ $(BUILDDIR)/enrich_cmd.o $(BUILDDIR)/enrich_version.o \
+		$(BUILDDIR)/thrtutil.o $(BUILDDIR)/thrt_cli.o \
+		$(BUILDDIR)/overlay_tool.o $(BUILDDIR)/prev_lookup.o $(JSON_LIBS)
+
+test: $(BUILDDIR)/$(SHLIB) $(BUILDDIR)/enrich $(BUILDDIR)/test_thrt_ipparse $(BUILDDIR)/test_prev
 	$(BUILDDIR)/test_thrt_ipparse
 	$(BUILDDIR)/test_prev
 	rm -rf $(BUILDDIR)/smoke && mkdir -p $(BUILDDIR)/smoke
-	$(BUILDDIR)/thrtutil -o $(BUILDDIR)/smoke/threat.thrt testdata/one.csv
-	test -s $(BUILDDIR)/smoke/threat.thrt
-	ENRICH_THRTUTIL=$(BUILDDIR)/thrtutil python3 cli/enrich build -c testdata/enrich.json
+	$(BUILDDIR)/enrich -c testdata/enrich.json build
 	test -s $(BUILDDIR)/smoke/from-cli.thrt
-	$(BUILDDIR)/thrt_cli $(BUILDDIR)/smoke/from-cli.thrt 203.0.113.7 >/dev/null
+	$(BUILDDIR)/enrich -c testdata/enrich.json lookup 203.0.113.7 >/dev/null
+	$(BUILDDIR)/enrich -c testdata/enrich.json lookup 198.51.100.10 >/dev/null
+	$(BUILDDIR)/enrich -c testdata/enrich.json lookup 198.51.100.9 >/dev/null
 
 $(BUILDDIR)/test_thrt_ipparse: $(SRCDIR)/test_thrt_ipparse.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) -Werror -o $@ $(SRCDIR)/test_thrt_ipparse.c
@@ -130,10 +137,7 @@ install: all
 	cp $(SRCDIR)/enrich.h $(SRCDIR)/thrt_format.h $(SRCDIR)/thrt_logic.h \
 	   $(SRCDIR)/thrt_ipparse.h $(SRCDIR)/thrt_overlay.h $(SRCDIR)/prev_format.h \
 	   $(DESTDIR)$(PREFIX)/include/enrich/
-	cp $(BUILDDIR)/thrtutil $(BUILDDIR)/thrt_cli $(BUILDDIR)/prev_lookup \
-	   $(DESTDIR)$(PREFIX)/bin/
-	cp cli/enrich $(DESTDIR)$(PREFIX)/bin/enrich
-	chmod 755 $(DESTDIR)$(PREFIX)/bin/enrich
+	cp $(BUILDDIR)/enrich $(DESTDIR)$(PREFIX)/bin/enrich
 	cp enrich.pc $(DESTDIR)$(PCDIR)/
 
 clean:
