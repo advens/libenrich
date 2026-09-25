@@ -1,7 +1,15 @@
 # libenrich
 
-Build the files a log enricher reads: one threat database, an overlay,
-GeoIP databases, a user-agent table, and a public-suffix table.
+Build the files a log enricher reads.
+
+Feeds:
+
+- MISP. `url`, `key`, and `since` pull `/attributes/restSearch`. The body is saved as `.misp.json` and compiled into the threat database.
+- Local indicators. `csv`, `json`, `lookup`, `txt`, `ioc`, and a `.misp.json` you already have. `layer` is `cti` or `cti_r`.
+- Context. `tags` for an asset, an inventory, or a cartography file. Same database, layer `tags`.
+- Overlay. A whitelist, tag, or add list (`.ovly`).
+- GeoIP. MaxMind City and ASN. The checksum skips an unchanged archive.
+- User-agent table and public-suffix table. Plain downloads.
 
 ```
 make
@@ -22,10 +30,32 @@ enrich -c /etc/enrich.json apply-delta --segment /var/lib/enrich/delta.csv \
     --feed-key public --snapshot --ttl-days 30 --generation 2
 ```
 
-`fetch` downloads GeoIP, MISP, the user-agent table, and the public-suffix
-table. `build` compiles `threat.thrt` and the overlay. `run` is fetch,
-then build. `lookup` queries the database named by `output`.
-`apply-delta` folds one segment into that database.
+`fetch` downloads GeoIP, every MISP feed that has a `url`, the
+user-agent table, and the public-suffix table. `build` compiles
+`threat.thrt` (including the saved MISP file and the context layer)
+and the overlay. `run` is fetch, then build. `lookup` queries the
+database named by `output`. `apply-delta` folds one segment into
+that database.
+
+MISP in the config, on its own:
+
+```json
+{
+  "name": "misp",
+  "type": "misp",
+  "layer": "cti",
+  "url": "https://misp.example",
+  "key": "",
+  "since": "7d",
+  "dest": "/var/lib/enrich/misp.misp.json"
+}
+```
+
+`url` is the server, with no path. `key` is the automation token.
+`since` is the MISP `last` window (`7d`, `30d`). `dest` is where the
+JSON is written. `enrich run` fetches it, then compiles `dest` into
+`output`. A feed with `path` and no `url` compiles a `.misp.json` you
+already downloaded.
 
 With no `-c`, `enrich` reads `./enrich.json`, then `/etc/enrich.json`.
 Keep the file mode `0600`. Account ids, license keys, and tokens are

@@ -441,8 +441,13 @@ static void usage(void)
             "              [--snapshot] [--ttl-days N] [--generation G]\n"
             "\n"
             "Config, when -c is omitted: ./enrich.json then /etc/enrich.json.\n"
-            "GeoIP account_id and license_key, MISP url and key, and UA/TLD\n"
-            "urls are fields in that file.\n");
+            "Feeds in that file:\n"
+            "  misp     url, key, since, dest, layer   live /attributes/restSearch\n"
+            "  csv json lookup txt ioc misp           local files, layer cti or cti_r\n"
+            "  tags     path                           context layer of the same database\n"
+            "  overlay  path, dest\n"
+            "  geoip    account_id, license_key, dest_dir, editions\n"
+            "  ua tld   url, dest\n");
 }
 
 int main(int argc, char **argv)
