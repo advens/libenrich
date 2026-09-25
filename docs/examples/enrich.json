@@ -1,0 +1,15 @@
+{
+  "output": "build/docs/threat.thrt",
+  "feeds": [
+    {"name": "public-csv", "type": "csv", "layer": "cti", "path": "docs/examples/public.csv"},
+    {"name": "dictionary", "type": "json", "layer": "cti", "path": "docs/examples/dictionary.json"},
+    {"name": "lookup", "type": "lookup", "layer": "cti", "path": "docs/examples/table.lookup"},
+    {"name": "plain", "type": "txt", "layer": "cti", "path": "docs/examples/iocs.txt"},
+    {"name": "ioc-list", "type": "ioc", "layer": "cti", "path": "docs/examples/iocs.ioc"},
+    {"name": "saved-misp", "type": "misp", "layer": "cti", "path": "docs/examples/event.misp.json"},
+    {"name": "restricted", "type": "csv", "layer": "cti_r", "path": "docs/examples/restricted.csv"},
+    {"name": "cmdb", "type": "tags", "path": "docs/examples/cmdb.tags"},
+    {"name": "cartography", "type": "tags", "path": "docs/examples/carto.tags.json"},
+    {"name": "overlay", "type": "overlay", "path": "docs/examples/allow.json", "dest": "build/docs/allow.ovly"}
+  ]
+}

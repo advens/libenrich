@@ -5,5 +5,5 @@
 /.gitignore      export-ignore
 /.gitmessage     export-ignore
 /.gitattributes  export-ignore
-/docs/           export-ignore
+/docs/COMMIT.md   export-ignore
 /scripts/        export-ignore

@@ -123,6 +123,7 @@ test: $(BUILDDIR)/$(SHLIB) $(BUILDDIR)/enrich $(BUILDDIR)/test_thrt_ipparse $(BU
 	$(BUILDDIR)/enrich -c testdata/enrich.json lookup 203.0.113.7 >/dev/null
 	$(BUILDDIR)/enrich -c testdata/enrich.json lookup 198.51.100.10 >/dev/null
 	$(BUILDDIR)/enrich -c testdata/enrich.json lookup 198.51.100.9 >/dev/null
+	sh docs/check.sh
 
 $(BUILDDIR)/test_thrt_ipparse: $(SRCDIR)/test_thrt_ipparse.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) -Werror -o $@ $(SRCDIR)/test_thrt_ipparse.c

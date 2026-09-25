@@ -1,0 +1,2 @@
+action,type,indicator,confidence,category,feed,tlp
++,ip,203.0.113.60,70,scanner,delta,green

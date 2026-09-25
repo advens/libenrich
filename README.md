@@ -1,6 +1,7 @@
 # libenrich
 
-Build the files a log enricher reads.
+Build the files a log enricher reads. The manual, with a worked
+example that `make test` runs, is [docs/manual.md](docs/manual.md).
 
 Feeds:
 
