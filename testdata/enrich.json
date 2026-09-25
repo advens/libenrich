@@ -1,0 +1,6 @@
+{
+  "output": "build/smoke/from-cli.thrt",
+  "layers": [
+    {"layer": "cti", "files": ["testdata/one.csv"]}
+  ]
+}

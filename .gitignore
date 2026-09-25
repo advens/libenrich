@@ -1,0 +1,9 @@
+/build/
+*.o
+*.a
+*.so
+*.dylib
+*.dSYM/
+/enrich.pc
+__pycache__/
+*.pyc

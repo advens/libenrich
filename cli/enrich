@@ -1,0 +1,173 @@
+#!/usr/bin/env python3
+"""Central feed builder. Writes the files mmenrich reads.
+
+Distribution to edges is not this command. GeoIP, ua.json, and tld.json
+are downloads. .thrt is built by the installed thrtutil.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tarfile
+from io import BytesIO
+from pathlib import Path
+from urllib.request import Request, urlopen
+
+
+MAXMIND_BASE = "https://download.maxmind.com/geoip/databases"
+
+
+def thrtutil_path() -> str:
+    env = os.environ.get("ENRICH_THRTUTIL", "")
+    if env and os.access(env, os.X_OK):
+        return env
+    found = shutil.which("thrtutil")
+    if found:
+        return found
+    here = Path(__file__).resolve().parents[1] / "build" / "thrtutil"
+    if here.is_file() and os.access(here, os.X_OK):
+        return str(here)
+    sys.exit("thrtutil not found (set ENRICH_THRTUTIL)")
+
+
+def load_config(path: str) -> dict:
+    with open(path, encoding="utf-8") as fh:
+        cfg = json.load(fh)
+    if not isinstance(cfg, dict):
+        sys.exit("config must be a JSON object")
+    return cfg
+
+
+def build(cfg: dict) -> None:
+    out = cfg.get("output")
+    layers = cfg.get("layers") or []
+    if not out or not layers:
+        sys.exit("build requires output and layers")
+    cmd = [thrtutil_path(), "-o", out]
+    for layer in layers:
+        name = layer.get("layer", "cti")
+        files = layer.get("files") or []
+        if not files:
+            sys.exit(f"layer {name} has no files")
+        cmd.extend(["-l", name])
+        cmd.extend(files)
+    subprocess.check_call(cmd)
+
+
+def apply_delta(cfg: dict, segment: str, feed_key: str, snapshot: bool,
+                ttl_days: int, generation: int) -> None:
+    out = cfg.get("output")
+    if not out:
+        sys.exit("apply-delta requires output")
+    cmd = [thrtutil_path(), "--apply-delta", segment, "-o", out]
+    if feed_key:
+        cmd.extend(["--feed-key", feed_key])
+    if snapshot:
+        cmd.append("--snapshot")
+    if ttl_days:
+        cmd.extend(["--ttl-days", str(ttl_days)])
+    if generation:
+        cmd.extend(["--generation", str(generation)])
+    subprocess.check_call(cmd)
+
+
+def _curl(url: str, user: str | None) -> bytes:
+    cmd = ["curl", "-sS", "-L", "--max-time", "120"]
+    if user:
+        cmd.extend(["-u", user])
+    cmd.append(url)
+    result = subprocess.run(cmd, capture_output=True, timeout=140)
+    if result.returncode != 0:
+        err = result.stderr.decode(errors="replace").strip()
+        raise OSError(f"curl failed: {err or result.returncode}")
+    if not result.stdout:
+        raise ValueError(f"empty response from {url}")
+    return result.stdout
+
+
+def fetch_url(url: str, dest: str) -> None:
+    path = Path(dest)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = urlopen(Request(url), timeout=120).read()
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_bytes(data)
+    os.replace(tmp, path)
+
+
+def fetch_geoip(section: dict) -> None:
+    account = os.environ.get(section.get("account_id_env", "MAXMIND_ACCOUNT_ID"), "")
+    key = os.environ.get(section.get("license_key_env", "MAXMIND_LICENSE_KEY"), "")
+    if not account or not key:
+        sys.exit("geoip is configured but MaxMind credentials are unset")
+    dest_dir = Path(section.get("dest_dir", "out"))
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    user = f"{account}:{key}"
+    for edition in section.get("editions") or ["GeoLite2-City", "GeoLite2-ASN"]:
+        sha_url = f"{MAXMIND_BASE}/{edition}/download?suffix=tar.gz.sha256"
+        tar_url = f"{MAXMIND_BASE}/{edition}/download?suffix=tar.gz"
+        remote = _curl(sha_url, user).decode().strip().split()[0]
+        mmdb = dest_dir / f"{edition}.mmdb"
+        marker = dest_dir / f"{edition}.sha256"
+        if mmdb.is_file() and marker.is_file() and marker.read_text().strip() == remote:
+            continue
+        blob = _curl(tar_url, user)
+        extracted = None
+        with tarfile.open(fileobj=BytesIO(blob), mode="r:gz") as tar:
+            for member in tar.getmembers():
+                if member.name.endswith(".mmdb") and member.isfile():
+                    extracted = tar.extractfile(member)
+                    if extracted is not None:
+                        data = extracted.read()
+                        tmp = mmdb.with_suffix(".mmdb.tmp")
+                        tmp.write_bytes(data)
+                        os.replace(tmp, mmdb)
+                    break
+        if not mmdb.is_file():
+            sys.exit(f"{edition}: archive had no .mmdb")
+        marker.write_text(remote + "\n")
+
+
+def fetch(cfg: dict) -> None:
+    if "geoip" in cfg:
+        fetch_geoip(cfg["geoip"])
+    for item in cfg.get("files") or []:
+        fetch_url(item["url"], item["dest"])
+
+
+def main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(prog="enrich")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    b = sub.add_parser("build", help="build the .thrt from local inputs")
+    b.add_argument("-c", "--config", required=True)
+
+    f = sub.add_parser("fetch", help="download GeoIP and plain files")
+    f.add_argument("-c", "--config", required=True)
+
+    d = sub.add_parser("apply-delta", help="fold one segment into the .thrt")
+    d.add_argument("-c", "--config", required=True)
+    d.add_argument("--segment", required=True)
+    d.add_argument("--feed-key", default="")
+    d.add_argument("--snapshot", action="store_true")
+    d.add_argument("--ttl-days", type=int, default=0)
+    d.add_argument("--generation", type=int, default=0)
+
+    args = parser.parse_args(argv)
+    cfg = load_config(args.config)
+    if args.cmd == "build":
+        build(cfg)
+    elif args.cmd == "fetch":
+        fetch(cfg)
+    else:
+        apply_delta(cfg, args.segment, args.feed_key, args.snapshot,
+                    args.ttl_days, args.generation)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

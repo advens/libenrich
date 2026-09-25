@@ -1,0 +1,10 @@
+prefix=@PREFIX@
+exec_prefix=${prefix}
+libdir=${exec_prefix}/lib
+includedir=${prefix}/include
+
+Name: libenrich
+Description: Feed formats and builders for mmenrich
+Version: @VERSION@
+Libs: -L${libdir} -lenrich
+Cflags: -I${includedir}/enrich
