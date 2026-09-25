@@ -62,9 +62,6 @@ With no `-c`, `enrich` reads `./enrich.json`, then `/etc/enrich.json`.
 Keep the file mode `0600`. Account ids, license keys, and tokens are
 fields in that file. They are not environment variables.
 
-`thrtutil` is the same builder, installed for callers that already pass
-`thrtutil` arguments (`-o`, `-l`, `--apply-delta`). New use is `enrich`.
-
 A GeoIP `fetch` downloads the edition checksum every time. The archive
 is skipped when that checksum matches the local database.
 

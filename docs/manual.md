@@ -12,9 +12,8 @@ make
 make install PREFIX=/usr/local
 ```
 
-`pkg-config libfastjson` must succeed. The install puts `enrich` and
-`thrtutil` on `PATH`. `thrtutil` is the same builder for a caller that
-already passes `-o`, `-l`, and `--apply-delta`. New use is `enrich`.
+`pkg-config libfastjson` must succeed. The install puts `enrich` on
+`PATH`.
 
 ## Config file
 

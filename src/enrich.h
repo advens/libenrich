@@ -1,8 +1,7 @@
 /* Public surface of libenrich.
  *
- * The on-disk formats and their lookup helpers are header-only. The
- * builders are the installed commands (thrtutil, thrt_cli, overlay_tool,
- * prev_lookup). enrich_version() is the SONAME anchor mmenrich links.
+ * The on-disk formats and their lookup helpers are header-only.
+ * enrich_version() is the SONAME anchor.
  *
  * Copyright 2026 Advens.
  * Licensed under the Apache License, Version 2.0. See LICENSE.
