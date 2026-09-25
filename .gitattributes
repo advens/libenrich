@@ -1,0 +1,9 @@
+# Distfile is the library and the builders. The GitHub harness stays
+# out of `git archive`.
+/.githooks/      export-ignore
+/.github/        export-ignore
+/.gitignore      export-ignore
+/.gitmessage     export-ignore
+/.gitattributes  export-ignore
+/docs/           export-ignore
+/scripts/        export-ignore

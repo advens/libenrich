@@ -1,0 +1,54 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  commit-msg:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: check commit messages
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -eu
+          if [ -n "${PR_TITLE:-}" ]; then
+            printf '%s\n\n%s\n' "$PR_TITLE" "$PR_BODY" | scripts/check-commit-msg.sh --label "PR #${PR_NUMBER}" --stdin
+          fi
+          if [ -n "${BASE:-}" ]; then
+            git rev-list --reverse "$BASE..$HEAD"
+          else
+            git rev-list --reverse -n 1 HEAD
+          fi | while read -r c; do
+            git log -1 --format=%B "$c" | scripts/check-commit-msg.sh --label "commit ${c}" --stdin
+          done
+
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: make test
+        run: make test
+
+  test-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: make test
+        run: make test
