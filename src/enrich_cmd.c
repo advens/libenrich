@@ -42,29 +42,73 @@ static const char *jstr(struct json_object *obj, const char *key)
     return json_object_get_string(v);
 }
 
-static struct json_object *load_config(const char *path)
+/* Open path once. required means -c was given: a missing file or a
+ * non-regular file is fatal. Otherwise a failure means "try the next
+ * candidate". The returned descriptor is the only handle used to stat
+ * and read, so a later replacement of the path is not the file we parse. */
+static int open_config(const char *path, int required)
+{
+    int fd;
+    struct stat st;
+
+    fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        if (required)
+            die("cannot open config");
+        return -1;
+    }
+    if (fstat(fd, &st) != 0) {
+        close(fd);
+        if (required)
+            die("cannot stat config");
+        return -1;
+    }
+    if (!S_ISREG(st.st_mode)) {
+        close(fd);
+        if (required)
+            die("config is not a regular file");
+        return -1;
+    }
+    return fd;
+}
+
+static struct json_object *load_config(int fd, const char *path)
 {
     struct stat st;
-    FILE *f;
     char *buf;
     struct json_object *root;
-    size_t n;
+    size_t got;
+    ssize_t n;
 
-    if (stat(path, &st) != 0)
+    if (fstat(fd, &st) != 0) {
+        close(fd);
         die("cannot stat config");
-    if (st.st_size <= 0 || st.st_size > 1024 * 1024)
-        die("config is empty or larger than 1MB");
-    buf = malloc((size_t)st.st_size + 1);
-    if (buf == NULL)
-        die("out of memory");
-    f = fopen(path, "r");
-    if (f == NULL) {
-        free(buf);
-        die("cannot open config");
     }
-    n = fread(buf, 1, (size_t)st.st_size, f);
-    fclose(f);
-    buf[n] = '\0';
+    if (st.st_size <= 0 || st.st_size > 1024 * 1024) {
+        close(fd);
+        die("config is empty or larger than 1MB");
+    }
+    buf = malloc((size_t)st.st_size + 1);
+    if (buf == NULL) {
+        close(fd);
+        die("out of memory");
+    }
+    got = 0;
+    while (got < (size_t)st.st_size) {
+        n = read(fd, buf + got, (size_t)st.st_size - got);
+        if (n < 0) {
+            if (errno == EINTR)
+                continue;
+            free(buf);
+            close(fd);
+            die("cannot read config");
+        }
+        if (n == 0)
+            break;
+        got += (size_t)n;
+    }
+    close(fd);
+    buf[got] = '\0';
     root = json_tokener_parse(buf);
     free(buf);
     if (root == NULL)
@@ -80,16 +124,26 @@ static struct json_object *load_config(const char *path)
     return root;
 }
 
-static const char *find_config(const char *opt)
+static int open_chosen_config(const char *opt, const char **path_out)
 {
-    if (opt != NULL && opt[0] != '\0')
-        return opt;
-    if (access("enrich.json", R_OK) == 0)
-        return "enrich.json";
-    if (access("/etc/enrich.json", R_OK) == 0)
-        return "/etc/enrich.json";
+    int fd;
+
+    if (opt != NULL && opt[0] != '\0') {
+        *path_out = opt;
+        return open_config(opt, 1);
+    }
+    fd = open_config("enrich.json", 0);
+    if (fd >= 0) {
+        *path_out = "enrich.json";
+        return fd;
+    }
+    fd = open_config("/etc/enrich.json", 0);
+    if (fd >= 0) {
+        *path_out = "/etc/enrich.json";
+        return fd;
+    }
     die("no config (pass -c, or create ./enrich.json or /etc/enrich.json)");
-    return NULL;
+    return -1;
 }
 
 /* curl writes to dest. user is user:pass for Basic auth, or NULL.
@@ -460,7 +514,9 @@ int main(int argc, char **argv)
     int snapshot = 0;
     const char *ttl = NULL;
     const char *generation = NULL;
+    const char *cfg_path = NULL;
     struct json_object *cfg;
+    int cfg_fd;
     int i;
 
     for (i = 1; i < argc; i++) {
@@ -507,7 +563,8 @@ int main(int argc, char **argv)
         printf("%s\n", enrich_version());
         return 0;
     }
-    cfg = load_config(find_config(config));
+    cfg_fd = open_chosen_config(config, &cfg_path);
+    cfg = load_config(cfg_fd, cfg_path);
     if (strcmp(cmd, "build") == 0)
         cmd_build(cfg);
     else if (strcmp(cmd, "fetch") == 0)
