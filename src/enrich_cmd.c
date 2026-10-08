@@ -182,7 +182,7 @@ static int curl_to_file(const char *url, const char *user, const char *hdr,
     char tmp[1024];
     pid_t pid;
     int status;
-    char *argv[16];
+    char *argv[20];
     int n = 0;
 
     mkdir_parent(dest);
@@ -201,6 +201,10 @@ static int curl_to_file(const char *url, const char *user, const char *hdr,
         argv[n++] = (char *)hdr;
     }
     if (body != NULL) {
+        argv[n++] = "-H";
+        argv[n++] = "Accept: application/json";
+        argv[n++] = "-H";
+        argv[n++] = "Content-Type: application/json";
         argv[n++] = "-d";
         argv[n++] = (char *)body;
     }

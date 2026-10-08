@@ -47,50 +47,128 @@ folds one CSV, MISP, or STIX segment into `output`.
 
 ## MISP
 
-Live pull. `url` is the server, with no path. `key` is the automation
-token. `since` is the MISP `last` window. `dest` is the file that is
-written, and the file `build` then compiles.
+Live pull, then a local compile. `url` is the server origin, with no
+path and no trailing slash. `key` is the automation key. The `Authorization` value is that
+key alone. `since` is
+copied into the MISP field `last`. Omit it and the request uses `7d`.
+`1d`, `12h`, and `30d` are the same kind of value. `dest` must end in
+`.misp` or `.misp.json`. That suffix is what makes `build` treat the
+file as MISP. Any other `.json` name is the dictionary form below.
 
 ```json
 {
-  "name": "misp",
-  "type": "misp",
-  "layer": "cti",
-  "url": "https://misp.example",
-  "key": "",
-  "since": "7d",
-  "dest": "/var/lib/enrich/misp.misp.json"
+  "output": "/var/lib/enrich/threat.thrt",
+  "feeds": [
+    {
+      "name": "misp",
+      "type": "misp",
+      "layer": "cti",
+      "url": "https://misp.example",
+      "key": "",
+      "since": "7d",
+      "dest": "/var/lib/enrich/misp.misp.json"
+    }
+  ]
 }
 ```
 
-`enrich fetch` sends:
+`name` is a label in the config. `lookup` prints the file stem.
+`misp.misp.json` is feed `misp`.
+
+`enrich fetch` requires `curl` on `PATH`. It sends one request:
 
 ```
 POST https://misp.example/attributes/restSearch
 Authorization: <key>
+Accept: application/json
 Content-Type: application/json
 
 {"returnFormat":"json","last":"7d","to_ids":1,"limit":10000}
 ```
 
-The response body is stored at `dest` unchanged. `fetch` creates the
-directory that holds `dest`. `build` compiles that body in any of
-these shapes:
+`curl` follows redirects, stops at 120 seconds, and checks the server
+certificate. A private CA has to be in the trust store already. The body is written to `dest.tmp`
+and renamed onto `dest`. `fetch` creates the directory that holds
+`dest`. A missing `url`, an empty `key`, a missing `dest`, a missing
+`curl`, a TLS error, or an HTTP error exits 1 and leaves the previous
+`dest` in place. The failure line is `misp download failed` or
+`misp feed needs url, key, and dest in the config`.
+
+The request is one page. `limit` is 10000 and there is no `page`
+loop. Attributes past that page are not fetched and the command does
+not say so. Narrow `since`, or count the attributes in `dest`, before
+you treat the file as the whole window.
+
+The response is stored unchanged. `build` compiles these shapes:
 
 - a single event, `{"Event":{...}}`
 - an event search, `{"response":[{"Event":{...}}]}`
 - an attribute search, `{"response":{"Attribute":[...]}}`, which is what this POST returns
 - an attribute list, `{"Attribute":[...]}`
 
-A nested `Event` on an attribute supplies the event info, the threat
-level, and the event tags. An attribute is kept when `to_ids` is true.
-The request asks for at most 10000 attributes. `docs/check.sh` compiles
-`docs/examples/event.misp.json` and `docs/examples/attributes.misp.json`.
-The live POST is not run by the check: it needs a server and a token.
+A nested `Event` on an attribute supplies `info`, `threat_level_id`,
+and the event tags. An event export also walks `Object[].Attribute`.
+The attribute-search body does not. MISP already puts those object
+attributes in the `Attribute` array.
 
-A feed with `path` and no `url` does not call the server. It compiles
-the file you already have. An empty GeoIP account id and license key
-in the same file skip the GeoIP download, so this fetch still runs.
+An attribute is kept when `to_ids` is true. A missing `to_ids` is
+kept. `to_ids` false is dropped. The request already asks for
+`to_ids` 1. `deleted` and `published` are not read. If a deleted
+attribute is in the body and `to_ids` is true, it becomes a row.
+
+| MISP `type` | Stored as |
+|---|---|
+| `ip-src`, `ip-dst` | `ip` |
+| `ip-src\|port`, `ip-dst\|port` | `ip`, text before the pipe |
+| `domain`, `hostname` | `domain` |
+| `domain\|ip` | one `domain` row and one `ip` row |
+| `md5`, `sha1`, `sha256` | that hash type |
+| `filename\|md5`, `filename\|sha1`, `filename\|sha256` | the hash, text after the pipe |
+| `url` | `url` |
+| `email-src`, `email-dst` | `email` |
+
+Any other type is dropped. A value longer than 511 bytes is cut.
+
+| MISP `category` | Lookup category |
+|---|---|
+| `Network activity`, `Attribution` | Attack |
+| `Payload delivery`, `Payload installation`, `Persistence mechanism`, `Artifacts dropped`, `Antivirus detection` | Malware |
+| `Targeting data`, `Financial fraud` | Phishing |
+| anything else, or no category | Unknown |
+
+`threat_level_id` may be a string or an integer. `1` is confidence
+90, `2` is 70, `3` is 50, and any other value, including a missing
+event, is 70.
+
+A tag whose name starts with `tlp:` sets the mark. `red`, then
+`amber` (so `amber+strict` is amber), then `green`, otherwise clear.
+`lookup` prints clear as `WHITE`. An attribute tag wins over the
+event tag. Other tag names are kept. The event `info` is stored as
+`misp-event:<info>`.
+
+`docs/check.sh` compiles `docs/examples/event.misp.json` and
+`docs/examples/attributes.misp.json` without calling a server.
+`203.0.113.55` is the saved event. `203.0.113.61` is an attribute
+with a nested event (TLP green, confidence 90, tag
+`misp-event:search-sample`). `203.0.113.62` has no nested event (TLP
+white, confidence 70). `skip.example` is `to_ids` false and must not
+match.
+
+To test your own server, put the config above in a file of mode
+`0600`, leave the GeoIP account id and license key empty or omit the
+`geoip` object, and run:
+
+```
+enrich -c enrich.json fetch
+enrich -c enrich.json build
+enrich -c enrich.json lookup 203.0.113.61
+```
+
+Replace the last argument with an indicator you know is `to_ids` on
+that server. A hit prints `CTI` and a TLP word. A value you know is
+`to_ids` false, or whose type is not in the table, prints `NO MATCH.`
+`run` is `fetch`, then `build`. A feed with `path` and no `url` does
+not call the server. It compiles the file you already have.
 
 ## STIX 2.1
 

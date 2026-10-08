@@ -12,7 +12,8 @@
   `/attributes/restSearch` (`{"response":{"Attribute":[...]}}`),
   including a nested Event on each attribute. An empty GeoIP account
   id and license key skip the GeoIP download. `fetch` creates the
-  directory that holds a download.
+  directory that holds a download. The MISP POST sends
+  `Accept: application/json` and `Content-Type: application/json`.
 
 ## [0.1.1]
 

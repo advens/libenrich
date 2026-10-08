@@ -5,7 +5,7 @@ example that `make test` runs, is [docs/manual.md](docs/manual.md).
 
 Feeds:
 
-- MISP. `url`, `key`, and `since` pull `/attributes/restSearch`. The body is saved as `.misp.json` and compiled into the threat database.
+- MISP. `url`, `key`, and `since` pull `/attributes/restSearch` (one page, at most 10000 attributes). The body is saved as `.misp.json` and compiled into the threat database. The manual lists the request, the attribute types that become a row, and the lookup check.
 - STIX 2.1. `url` and `dest` GET one bundle, or `path` compiles a `.stix` or `.stix.json` you already have. Indicator patterns, and cyber-observable objects when the bundle has no indicator, become rows of the same database. `layer` is `cti` or `cti_r`. The manual states which pattern forms become a row.
 - Local indicators. `csv`, `json`, `lookup`, `txt`, `ioc`, and a `.misp.json` you already have. `layer` is `cti` or `cti_r`.
 - Context. `tags` for an asset, an inventory, or a cartography file. Same database, layer `tags`.
