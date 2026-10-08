@@ -6,6 +6,7 @@ example that `make test` runs, is [docs/manual.md](docs/manual.md).
 Feeds:
 
 - MISP. `url`, `key`, and `since` pull `/attributes/restSearch`. The body is saved as `.misp.json` and compiled into the threat database.
+- STIX 2.1. `url` and `dest` GET one bundle, or `path` compiles a `.stix` or `.stix.json` you already have. Indicator patterns, and cyber-observable objects when the bundle has no indicator, become rows of the same database. `layer` is `cti` or `cti_r`. The manual states which pattern forms become a row.
 - Local indicators. `csv`, `json`, `lookup`, `txt`, `ioc`, and a `.misp.json` you already have. `layer` is `cti` or `cti_r`.
 - Context. `tags` for an asset, an inventory, or a cartography file. Same database, layer `tags`.
 - Overlay. A whitelist, tag, or add list (`.ovly`).
@@ -31,12 +32,14 @@ enrich -c /etc/enrich.json apply-delta --segment /var/lib/enrich/delta.csv \
     --feed-key public --snapshot --ttl-days 30 --generation 2
 ```
 
-`fetch` downloads GeoIP, every MISP feed that has a `url`, the
-user-agent table, and the public-suffix table. `build` compiles
-`threat.thrt` (including the saved MISP file and the context layer)
-and the overlay. `run` is fetch, then build. `lookup` queries the
-database named by `output`. `apply-delta` folds one segment into
-that database.
+`fetch` downloads GeoIP, every MISP feed that has a `url`, every STIX
+feed that has a `url`, the user-agent table, and the public-suffix
+table. `build` compiles `threat.thrt` (including the saved MISP file,
+the saved STIX bundle, and the context layer) and the overlay. `run`
+is fetch, then build. `lookup` queries the database named by `output`.
+`apply-delta` folds one segment into that database. A `.stix` or
+`.stix.json` segment is STIX. A `.misp.json` segment, and any other
+`.json` segment, is MISP. A `.csv` segment is CSV.
 
 MISP in the config, on its own:
 
@@ -63,7 +66,9 @@ Keep the file mode `0600`. Account ids, license keys, and tokens are
 fields in that file. They are not environment variables.
 
 A GeoIP `fetch` downloads the edition checksum every time. The archive
-is skipped when that checksum matches the local database.
+is skipped when that checksum matches the local database. An empty
+account id and license key skip the GeoIP download, so a config that
+only fills the MISP key still fetches MISP.
 
 ## Config
 
@@ -84,6 +89,7 @@ is skipped when that checksum matches the local database.
     {"name": "ioc-list", "type": "ioc", "layer": "cti", "path": "/var/lib/enrich/iocs.ioc"},
     {"name": "restricted", "type": "csv", "layer": "cti_r", "path": "/var/lib/enrich/restricted.csv"},
     {"name": "misp", "type": "misp", "layer": "cti", "url": "https://misp.example", "key": "", "since": "7d", "dest": "/var/lib/enrich/misp.misp.json"},
+    {"name": "stix", "type": "stix", "layer": "cti", "url": "https://cti.example/bundle.json", "dest": "/var/lib/enrich/bundle.stix.json"},
     {"name": "cmdb", "type": "tags", "path": "/var/lib/enrich/cmdb.tags"},
     {"name": "cartography", "type": "tags", "path": "/var/lib/enrich/carto.tags.json"},
     {"name": "ua", "type": "ua", "url": "https://example.invalid/ua.json", "dest": "/var/lib/enrich/ua.json"},
@@ -95,7 +101,7 @@ is skipped when that checksum matches the local database.
 
 | Output | Feed `type` | Role |
 |---|---|---|
-| `output` (`.thrt`) | `csv`, `json`, `lookup`, `txt`, `ioc`, `misp` | Threat indicators. `layer` is `cti` or `cti_r`. A `misp` feed with `url` is fetched from `/attributes/restSearch` into `dest` before the build. |
+| `output` (`.thrt`) | `csv`, `json`, `lookup`, `txt`, `ioc`, `misp`, `stix` | Threat indicators. `layer` is `cti` or `cti_r`. A `misp` feed with `url` is fetched from `/attributes/restSearch` into `dest` before the build. A `stix` feed with `url` is one GET of that bundle into `dest`. `dest` for STIX ends in `.stix` or `.stix.json`. |
 | same file | `tags` | Context: asset, inventory, cartography. A path ending in `.tags.json` is the JSON form. |
 | `dest` of `overlay` | `overlay` | Whitelist, tag, or add list (`.ovly`). |
 | `dest_dir`/`edition`.mmdb | `geoip` | MaxMind City and ASN databases. The checksum skips an unchanged archive. |

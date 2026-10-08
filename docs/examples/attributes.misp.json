@@ -1,0 +1,29 @@
+{
+  "response": {
+    "Attribute": [
+      {
+        "id": "1",
+        "type": "ip-dst",
+        "category": "Network activity",
+        "to_ids": true,
+        "value": "203.0.113.61",
+        "Tag": [{"name": "tlp:green"}],
+        "Event": {"info": "search-sample", "threat_level_id": "1"}
+      },
+      {
+        "id": "2",
+        "type": "ip-src",
+        "category": "Network activity",
+        "to_ids": true,
+        "value": "203.0.113.62"
+      },
+      {
+        "id": "3",
+        "type": "domain",
+        "category": "Network activity",
+        "to_ids": false,
+        "value": "skip.example"
+      }
+    ]
+  }
+}
