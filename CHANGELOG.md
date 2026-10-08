@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.1.2]
+
 - `enrich` compiles a STIX 2.1 bundle, and a 2.0 indicator of the same
   shape, into the threat database. `fetch` GETs one bundle when the
   feed has a `url`. `apply-delta` accepts a `.stix` or `.stix.json`
