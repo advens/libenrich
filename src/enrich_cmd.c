@@ -148,15 +148,44 @@ static int open_chosen_config(const char *opt, const char **path_out)
 
 /* curl writes to dest. user is user:pass for Basic auth, or NULL.
  * hdr is an extra header, or NULL. body is a POST body, or NULL. */
+/* Create every directory above path. Existing directories are left as they are. */
+static void mkdir_parent(const char *path)
+{
+    char buf[1024];
+    char *slash;
+    char *p;
+    size_t n;
+
+    if (path == NULL)
+        return;
+    n = strlen(path);
+    if (n == 0 || n >= sizeof buf)
+        return;
+    memcpy(buf, path, n + 1);
+    slash = strrchr(buf, '/');
+    if (slash == NULL || slash == buf)
+        return;
+    *slash = '\0';
+    for (p = buf + 1; *p; p++) {
+        if (*p != '/')
+            continue;
+        *p = '\0';
+        mkdir(buf, 0755);
+        *p = '/';
+    }
+    mkdir(buf, 0755);
+}
+
 static int curl_to_file(const char *url, const char *user, const char *hdr,
                         const char *body, const char *dest)
 {
     char tmp[1024];
     pid_t pid;
     int status;
-    char *argv[16];
+    char *argv[20];
     int n = 0;
 
+    mkdir_parent(dest);
     snprintf(tmp, sizeof tmp, "%s.tmp", dest);
     argv[n++] = "curl";
     argv[n++] = "-fsS";
@@ -172,6 +201,10 @@ static int curl_to_file(const char *url, const char *user, const char *hdr,
         argv[n++] = (char *)hdr;
     }
     if (body != NULL) {
+        argv[n++] = "-H";
+        argv[n++] = "Accept: application/json";
+        argv[n++] = "-H";
+        argv[n++] = "Content-Type: application/json";
         argv[n++] = "-d";
         argv[n++] = (char *)body;
     }
@@ -290,8 +323,10 @@ static void fetch_geoip(struct json_object *geo)
     dest_dir = jstr(geo, "dest_dir");
     if (dest_dir == NULL)
         dest_dir = "out";
+    if ((account == NULL || account[0] == '\0') && (key == NULL || key[0] == '\0'))
+        return;
     if (account == NULL || account[0] == '\0' || key == NULL || key[0] == '\0')
-        die("geoip.account_id and geoip.license_key are empty in the config");
+        die("geoip.account_id and geoip.license_key must both be set");
     mkdir(dest_dir, 0755);
     snprintf(user, sizeof user, "%s:%s", account, key);
     if (!json_object_object_get_ex(geo, "editions", &editions) || editions == NULL)
@@ -397,6 +432,8 @@ static void cmd_fetch(struct json_object *cfg)
             continue;
         if (strcmp(type, "misp") == 0 && jstr(feed, "url") != NULL)
             fetch_misp(feed);
+        else if (strcmp(type, "stix") == 0 && jstr(feed, "url") != NULL)
+            fetch_plain(feed, type);
         else if (strcmp(type, "ua") == 0 || strcmp(type, "tld") == 0 ||
                  strcmp(type, "file") == 0)
             fetch_plain(feed, type);
@@ -408,7 +445,7 @@ static int is_thrt_type(const char *type)
     return strcmp(type, "csv") == 0 || strcmp(type, "json") == 0 ||
            strcmp(type, "lookup") == 0 || strcmp(type, "txt") == 0 ||
            strcmp(type, "ioc") == 0 || strcmp(type, "misp") == 0 ||
-           strcmp(type, "tags") == 0;
+           strcmp(type, "stix") == 0 || strcmp(type, "tags") == 0;
 }
 
 static void cmd_build(struct json_object *cfg)
@@ -497,7 +534,8 @@ static void usage(void)
             "Config, when -c is omitted: ./enrich.json then /etc/enrich.json.\n"
             "Feeds in that file:\n"
             "  misp     url, key, since, dest, layer   live /attributes/restSearch\n"
-            "  csv json lookup txt ioc misp           local files, layer cti or cti_r\n"
+            "  stix     url, dest, or path, layer      STIX 2.1 bundle\n"
+            "  csv json lookup txt ioc misp stix      local files, layer cti or cti_r\n"
             "  tags     path                           context layer of the same database\n"
             "  overlay  path, dest\n"
             "  geoip    account_id, license_key, dest_dir, editions\n"

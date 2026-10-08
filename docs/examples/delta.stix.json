@@ -1,0 +1,21 @@
+{
+  "type": "bundle",
+  "id": "bundle--33333333-3333-4333-8333-333333333333",
+  "spec_version": "2.1",
+  "objects": [
+    {
+      "type": "indicator",
+      "spec_version": "2.1",
+      "id": "indicator--33333333-3333-4333-8333-333333333380",
+      "created": "2026-01-01T00:00:00.000Z",
+      "modified": "2026-01-01T00:00:00.000Z",
+      "name": "delta add",
+      "pattern": "[ipv4-addr:value = '203.0.113.80']",
+      "pattern_type": "stix",
+      "pattern_version": "2.1",
+      "valid_from": "2026-01-01T00:00:00.000Z",
+      "indicator_types": ["malicious-activity"],
+      "confidence": 60
+    }
+  ]
+}

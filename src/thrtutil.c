@@ -4,6 +4,7 @@
  *   - CTI dictionary JSON (.json), multi-feed, with mmap for 1+ GB files
  *   - rsyslog JSON lookup tables (.lookup)
  *   - MISP JSON exports (.misp, .misp.json)
+ *   - STIX 2.1 bundles (.stix, .stix.json)
  *   - plain-text IOC lists (.txt, .ioc)
  *   - tag files (.tags, .tags.json)
  *
@@ -283,6 +284,16 @@ static void ensure_capacity(void) {
     if (!meta_db.items || !ip_db.items || !ip6_db.items || !str_db.items || !str_pool.data) {
         fprintf(stderr, "FATAL: Out of Memory\n"); exit(1);
     }
+}
+
+/* tags_offset 0 means "no tags" on read. A full build used to store the
+ * first tag list at offset 0, so that list disappeared. Keep a NUL there,
+ * matching compact_str_pool on the delta path. */
+static void str_pool_reserve_sentinel(void) {
+    if (str_pool.len > 0) return;
+    ensure_capacity();
+    str_pool.data[0] = '\0';
+    str_pool.len = 1;
 }
 
 /* --- Helper: Get/Create Feed Index (returns bitmask position 0-63) --- */
@@ -1480,8 +1491,12 @@ void process_cti_json(const char *filename) {
  * MISP JSON EXPORT PARSER
  *
  * Handles MISP JSON export formats:
- *   Single event:  {"Event": {"info":"...", "Attribute":[...], ...}}
- *   Multi-event:   {"response": [{"Event":{...}}, {"Event":{...}}]}
+ *   Single event:       {"Event": {"info":"...", "Attribute":[...], ...}}
+ *   Event search:       {"response": [{"Event":{...}}, {"Event":{...}}]}
+ *   Attribute search:   {"response": {"Attribute":[ {...}, ... ]}}
+ *   Attribute list:     {"Attribute":[ {...}, ... ]}
+ * An attribute from /attributes/restSearch may carry a nested Event.
+ * That Event supplies info, threat_level_id, and event tags.
  *
  * MISP attribute type -> IOC type mapping:
  *   ip-src, ip-dst                    -> "ip"
@@ -1961,8 +1976,153 @@ static const char *parse_misp_event(const char *p, const char *end,
     return p;
 }
 
+/* Read info, threat_level_id, and Tag from an Event object. p points at '{'. */
+static const char *misp_read_event_context(const char *p, const char *end,
+                                            char *info, size_t infosz,
+                                            int *threat_level,
+                                            char *tlp, size_t tlpsz,
+                                            char *tags, int *tags_pos, int tags_max) {
+    if (p >= end || *p != '{') return skip_json_val(p, end);
+    p++;
+    while (p < end) {
+        char key[32];
+        p = skip_ws(p, end);
+        if (p >= end || *p == '}') break;
+        if (*p == ',') { p++; continue; }
+        if (*p != '"') break;
+        p = extract_json_str(p, end, key, sizeof(key));
+        p = skip_ws(p, end);
+        if (p >= end || *p != ':') break;
+        p++;
+        p = skip_ws(p, end);
+        if (strcmp(key, "info") == 0) {
+            p = extract_json_str(p, end, info, infosz);
+        } else if (strcmp(key, "threat_level_id") == 0) {
+            if (p < end && *p == '"') {
+                char tlid[8];
+                p = extract_json_str(p, end, tlid, sizeof(tlid));
+                *threat_level = atoi(tlid);
+            } else {
+                p = extract_json_int(p, end, threat_level);
+            }
+        } else if (strcmp(key, "Tag") == 0) {
+            p = parse_misp_tags(p, end, tlp, tlpsz, tags, tags_pos, tags_max);
+        } else {
+            p = skip_json_val(p, end);
+        }
+    }
+    if (p < end && *p == '}') p++;
+    return p;
+}
+
+static void misp_close_event_tags(char *tags, int *pos, int max, const char *info) {
+    if (info && info[0]) {
+        char info_tag[300];
+        snprintf(info_tag, sizeof(info_tag), "misp-event:%.280s", info);
+        append_label(tags, pos, max, info_tag);
+    }
+    if (*pos < max - 1) {
+        tags[(*pos)++] = ']';
+        tags[*pos] = '\0';
+    }
+}
+
+/* One attribute from /attributes/restSearch. A nested Event is context. */
+static const char *parse_misp_search_attribute(const char *p, const char *end,
+                                                size_t *emitted, size_t *skipped) {
+    const char *start = p;
+    const char *event_at = NULL;
+    const char *q;
+    char info[256] = "";
+    int threat_level = 0;
+    char event_tlp[64] = "";
+    char event_tags[MAX_TAGS_JSON];
+    int event_tags_pos = 1;
+    uint8_t ev_tlp, ev_confidence;
+    const char *ev_tags;
+
+    event_tags[0] = '[';
+    event_tags[1] = '\0';
+    if (p >= end || *p != '{') return skip_json_val(p, end);
+    q = p + 1;
+    while (q < end) {
+        char key[32];
+        q = skip_ws(q, end);
+        if (q >= end || *q == '}') break;
+        if (*q == ',') { q++; continue; }
+        if (*q != '"') break;
+        q = extract_json_str(q, end, key, sizeof(key));
+        q = skip_ws(q, end);
+        if (q >= end || *q != ':') break;
+        q++;
+        q = skip_ws(q, end);
+        if (strcmp(key, "Event") == 0 && q < end && *q == '{') {
+            event_at = q;
+            q = skip_json_val(q, end);
+        } else {
+            q = skip_json_val(q, end);
+        }
+    }
+    if (event_at)
+        misp_read_event_context(event_at, end, info, sizeof(info), &threat_level,
+                                event_tlp, sizeof(event_tlp),
+                                event_tags, &event_tags_pos, (int)sizeof(event_tags));
+    misp_close_event_tags(event_tags, &event_tags_pos, (int)sizeof(event_tags), info);
+    ev_tlp = parse_tlp_mask(event_tlp);
+    ev_confidence = misp_threat_level_to_confidence(threat_level);
+    ev_tags = (event_tags_pos > 2) ? event_tags : NULL;
+    return parse_misp_attribute(start, end, ev_confidence, ev_tlp, ev_tags,
+                                emitted, skipped);
+}
+
+static const char *misp_parse_search_list(const char *p, const char *end,
+                                           size_t *emitted, size_t *skipped) {
+    if (p >= end || *p != '[') return skip_json_val(p, end);
+    p++;
+    while (p < end) {
+        p = skip_ws(p, end);
+        if (p >= end || *p == ']') break;
+        if (*p == ',') { p++; continue; }
+        p = parse_misp_search_attribute(p, end, emitted, skipped);
+    }
+    if (p < end && *p == ']') p++;
+    return p;
+}
+
+/* {"response":{"Attribute":[...]}} as returned by /attributes/restSearch. */
+static const char *misp_parse_response_object(const char *p, const char *end,
+                                               const char *filename,
+                                               size_t *emitted, size_t *skipped) {
+    int saw_attr = 0;
+    if (p >= end || *p != '{') return skip_json_val(p, end);
+    p++;
+    while (p < end) {
+        char key[32];
+        p = skip_ws(p, end);
+        if (p >= end || *p == '}') break;
+        if (*p == ',') { p++; continue; }
+        if (*p != '"') { p = skip_json_val(p, end); continue; }
+        p = extract_json_str(p, end, key, sizeof(key));
+        p = skip_ws(p, end);
+        if (p >= end || *p != ':') break;
+        p++;
+        p = skip_ws(p, end);
+        if (strcmp(key, "Attribute") == 0 && p < end && *p == '[') {
+            saw_attr = 1;
+            p = misp_parse_search_list(p, end, emitted, skipped);
+        } else {
+            p = skip_json_val(p, end);
+        }
+    }
+    if (p < end && *p == '}') p++;
+    if (!saw_attr)
+        fprintf(stderr, "%s %s: MISP response has no Attribute array\n",
+                ICON_WARN, filename);
+    return p;
+}
+
 /* Main MISP JSON processor.
- * Handles both single-event and multi-event (restSearch) formats. */
+ * Event export, event search, and attribute search. */
 void process_misp_json(const char *filename) {
     int fd = open(filename, O_RDONLY);
     if (fd < 0) {
@@ -2018,9 +2178,18 @@ void process_misp_json(const char *filename) {
     if (strcmp(first_key, "Event") == 0) {
         /* Single event: {"Event": {...}} */
         p = parse_misp_event(p, end, &emitted, &skipped);
+    } else if (strcmp(first_key, "Attribute") == 0) {
+        misp_parse_search_list(p, end, &emitted, &skipped);
+    } else if (strcmp(first_key, "response") == 0 && p < end && *p == '{') {
+        /* Attribute search: {"response":{"Attribute":[...]}} */
+        misp_parse_response_object(p, end, filename, &emitted, &skipped);
     } else if (strcmp(first_key, "response") == 0) {
-        /* Multi-event (restSearch): {"response": [{"Event":{...}}, ...]} */
-        if (p >= end || *p != '[') goto done;
+        /* Event search: {"response": [{"Event":{...}}, ...]} */
+        if (p >= end || *p != '[') {
+            fprintf(stderr, "%s %s: MISP response is not an event list or an Attribute object\n",
+                    ICON_WARN, filename);
+            goto done;
+        }
         p++; /* skip '[' */
 
         while (p < end) {
@@ -2146,6 +2315,8 @@ static uint32_t compute_file_checksum(FILE *f, size_t checksum_field_offset) {
     return crc ^ 0xFFFFFFFF;
 }
 
+#include "stix_feed.inc"
+
 /* ============================================================================
  * PROCESS FILE (with layer detection)
  * ============================================================================ */
@@ -2158,6 +2329,14 @@ void process_file(const char* filename) {
     if (dot) *dot = 0;
 
     const char* ext = strrchr(filename, '.');
+    /* sample.stix.json keeps one suffix after the first cut. Drop it so the
+     * feed name is the stem the operator typed. */
+    if (strcasestr(filename, ".stix.json") != NULL ||
+        (ext && strcasecmp(ext, ".stix") == 0)) {
+        char *suf = strrchr(g_default_source, '.');
+        if (suf && strcasecmp(suf, ".stix") == 0)
+            *suf = '\0';
+    }
     if (!ext) {
         fprintf(stderr, "%s No extension found for %s, skipping.\n", ICON_WARN, filename);
         return;
@@ -2179,6 +2358,10 @@ void process_file(const char* filename) {
     }
     else if (strcasecmp(ext, ".txt") == 0 || strcasecmp(ext, ".ioc") == 0) {
         process_plaintext(filename);
+    }
+    /* STIX 2.1 bundles (.stix, .stix.json). Before .json: the suffix is .json. */
+    else if (strcasestr(filename, ".stix.json") || strcasecmp(ext, ".stix") == 0) {
+        process_stix_json(filename);
     }
     /* MISP JSON exports (.misp, .misp.json) */
     else if (strcasestr(filename, ".misp.json") || strcasecmp(ext, ".misp") == 0) {
@@ -2547,6 +2730,7 @@ static void builder_state_reset(void) {
     memset(&stats, 0, sizeof(stats));
     g_current_layer = LAYER_CTI;
     snprintf(g_default_source, sizeof(g_default_source), "%s", "Unknown");
+    str_pool_reserve_sentinel();
 }
 
 /* ============================================================================
@@ -3014,6 +3198,12 @@ static int apply_delta_segment(const char *seg_path, const char *out_thrt,
         snprintf(feedbuf, sizeof(feedbuf), "%s", bn);
         char *dot = strrchr(feedbuf, '.');
         if (dot) *dot = 0;
+        if (strcasestr(bn, ".stix.json") != NULL ||
+            (strrchr(bn, '.') && strcasecmp(strrchr(bn, '.'), ".stix") == 0)) {
+            char *suf = strrchr(feedbuf, '.');
+            if (suf && strcasecmp(suf, ".stix") == 0)
+                *suf = '\0';
+        }
     }
     snprintf(g_default_source, sizeof(g_default_source), "%s", feedbuf);
 
@@ -3072,11 +3262,15 @@ static int apply_delta_segment(const char *seg_path, const char *out_thrt,
 
     const char *bn = strrchr(seg_path, '/');
     bn = bn ? bn + 1 : seg_path;
+    int is_stix = (strcasestr(bn, ".stix.json") != NULL) ||
+                  (strrchr(bn, '.') && strcasecmp(strrchr(bn, '.'), ".stix") == 0);
     int is_misp = (strcasestr(bn, ".misp.json") != NULL);
     const char *ext = strrchr(bn, '.');
     int is_json = (ext && strcasecmp(ext, ".json") == 0);
     int is_csv  = (ext && strcasecmp(ext, ".csv")  == 0);
-    if (is_misp || is_json) {
+    if (is_stix) {
+        process_stix_json(seg_path);
+    } else if (is_misp || is_json) {
         process_misp_json(seg_path);
     } else if (is_csv) {
         parse_csv_file(seg_path);          /* honours +/- rows incl. deletes */
@@ -3129,6 +3323,7 @@ void print_usage(const char* prog) {
     fprintf(stderr, "  .txt, .ioc      Plain text IOC list (one per line)\n");
     fprintf(stderr, "  .tags           Tags CSV: value,tag1,tag2,tag3,...\n");
     fprintf(stderr, "  .tags.json      Tags JSON: {\"index\":\"value\",\"tags\":[...]}\n");
+    fprintf(stderr, "  .stix, .stix.json  STIX 2.1 bundle (indicator patterns, or SCOs if no indicator)\n");
     fprintf(stderr, "\nDelta format (for incremental mode -i):\n");
     fprintf(stderr, "  +,type,value,confidence,category,feed,tlp   (add entry)\n");
     fprintf(stderr, "  -,type,value                                 (delete entry)\n");
@@ -3242,6 +3437,7 @@ int main(int argc, char **argv) {
     }
 
     /* In incremental mode, load the existing database first */
+    str_pool_reserve_sentinel();
     if (g_incremental) {
         if (g_verbose) printf("%s Incremental mode: loading existing database\n", ICON_GEAR);
         load_existing_thrt(thrt_out);

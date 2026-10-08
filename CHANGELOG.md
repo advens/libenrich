@@ -1,5 +1,22 @@
 # Changelog
 
+## [Unreleased]
+
+## [0.1.2]
+
+- `enrich` compiles a STIX 2.1 bundle, and a 2.0 indicator of the same
+  shape, into the threat database. `fetch` GETs one bundle when the
+  feed has a `url`. `apply-delta` accepts a `.stix` or `.stix.json`
+  segment. The on-disk `.thrt` layout is unchanged.
+- A full build keeps a leading NUL in the string pool, so the first
+  tag list is stored at a non-zero offset and `lookup` prints it.
+- `enrich` compiles the attribute search returned by
+  `/attributes/restSearch` (`{"response":{"Attribute":[...]}}`),
+  including a nested Event on each attribute. An empty GeoIP account
+  id and license key skip the GeoIP download. `fetch` creates the
+  directory that holds a download. The MISP POST sends
+  `Accept: application/json` and `Content-Type: application/json`.
+
 ## [0.1.1]
 
 - `enrich` opens its config once and reads that descriptor. The size
