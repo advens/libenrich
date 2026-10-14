@@ -858,19 +858,31 @@ static struct json_object *attribute_array(struct json_object *root)
 
 static struct json_object *load_json_file(const char *path)
 {
+    int fd;
     struct stat st;
     FILE *f;
     char *buf;
     size_t got;
     struct json_object *obj;
 
-    if (stat(path, &st) != 0 || st.st_size <= 0 || st.st_size > 64 * 1024 * 1024)
+    /* Size the descriptor that is read. A stat of the path, then a
+     * later open, is a different file if the path is replaced. */
+    fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
         return NULL;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) ||
+        st.st_size <= 0 || st.st_size > 64 * 1024 * 1024) {
+        close(fd);
+        return NULL;
+    }
     buf = malloc((size_t)st.st_size + 1);
-    if (buf == NULL)
+    if (buf == NULL) {
+        close(fd);
         return NULL;
-    f = fopen(path, "r");
+    }
+    f = fdopen(fd, "r");
     if (f == NULL) {
+        close(fd);
         free(buf);
         return NULL;
     }

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Offline checks for enrich sync. A local POST server stands in for MISP.
+# Offline checks for enrich sync. docs/sync-misp-standin.c stands in for MISP.
 set -eu
 cd "$(dirname "$0")/.."
 test -x build/enrich
@@ -90,74 +90,15 @@ else
     grep -q "needs libzmq" "$tmp/follow.err"
 fi
 
-cat >"$tmp/misp.py" <<'PY'
-import json
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-
-FULL = [
-    {
-        "id": "1",
-        "type": "ip-dst",
-        "value": "203.0.113.201",
-        "to_ids": True,
-        "timestamp": "100",
-        "category": "Network activity",
-        "Tag": [{"name": "tlp:green"}],
-        "Event": {"info": "sync-sample", "threat_level_id": "1"},
-    },
-    {
-        "id": "2",
-        "type": "ip-dst",
-        "value": "203.0.113.202",
-        "to_ids": True,
-        "timestamp": 150,
-        "category": "Network activity",
-    },
-]
-DELTA = [
-    {
-        "id": "1",
-        "type": "ip-dst",
-        "value": "203.0.113.201",
-        "to_ids": True,
-        "deleted": True,
-        "timestamp": 300,
-        "category": "Network activity",
-    }
-]
-
-class Handler(BaseHTTPRequestHandler):
-    def log_message(self, fmt, *args):
-        return
-
-    def do_POST(self):
-        n = int(self.headers.get("Content-Length", "0"))
-        body = json.loads(self.rfile.read(n).decode() or "{}")
-        last = str(body.get("last", ""))
-        page = int(body.get("page", 1))
-        limit = int(body.get("limit", 2000))
-        src = DELTA if last.isdigit() else FULL
-        start = (page - 1) * limit
-        chunk = src[start:start + limit]
-        payload = json.dumps({"response": {"Attribute": chunk}}).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(payload)))
-        self.end_headers()
-        self.wfile.write(payload)
-
-httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-print(httpd.server_address[1], flush=True)
-httpd.serve_forever()
-PY
-
-python3 "$tmp/misp.py" >"$tmp/port" &
+cc -std=c11 -O2 -o "$tmp/misp-standin" docs/sync-misp-standin.c
+"$tmp/misp-standin" >"$tmp/port" 2>"$tmp/standin.err" &
 srv=$!
 i=0
 while [ ! -s "$tmp/port" ]; do
     i=$((i + 1))
     if [ "$i" -gt 50 ]; then
         echo "misp stand-in did not start" >&2
+        cat "$tmp/standin.err" >&2 || true
         exit 1
     fi
     sleep 0.1
