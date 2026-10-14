@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.1.3]
+
 - `enrich sync` pages one MISP feed into `dest` and a `.cursor` file.
   The first pull, and `--full`, compiles `output` through `build`.
   A later window is one `apply-delta` generation. `--segment` folds a

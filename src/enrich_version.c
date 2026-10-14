@@ -2,5 +2,5 @@
 
 const char *enrich_version(void)
 {
-    return "0.1.2";
+    return "0.1.3";
 }
