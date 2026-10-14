@@ -5,7 +5,7 @@ example that `make test` runs, is [docs/manual.md](docs/manual.md).
 
 Feeds:
 
-- MISP. `url`, `key`, and `since` pull `/attributes/restSearch` (one page, at most 10000 attributes). The body is saved as `.misp.json` and compiled into the threat database. The manual lists the request, the attribute types that become a row, and the lookup check.
+- MISP. `fetch` pulls one page of `/attributes/restSearch` (at most 10000 attributes). `sync` pages that search into `dest` and a cursor. The body is saved as `.misp.json` and compiled into the threat database. The manual lists the request, the attribute types that become a row, and the lookup check.
 - STIX 2.1. `url` and `dest` GET one bundle, or `path` compiles a `.stix` or `.stix.json` you already have. Indicator patterns, and cyber-observable objects when the bundle has no indicator, become rows of the same database. `layer` is `cti` or `cti_r`. The manual states which pattern forms become a row.
 - Local indicators. `csv`, `json`, `lookup`, `txt`, `ioc`, and a `.misp.json` you already have. `layer` is `cti` or `cti_r`.
 - Context. `tags` for an asset, an inventory, or a cartography file. Same database, layer `tags`.
@@ -30,6 +30,8 @@ enrich -c /etc/enrich.json run
 enrich -c /etc/enrich.json lookup 203.0.113.7
 enrich -c /etc/enrich.json apply-delta --segment /var/lib/enrich/delta.csv \
     --feed-key public --snapshot --ttl-days 30 --generation 2
+enrich -c /etc/enrich.json sync
+enrich -c /etc/enrich.json sync --apply --hup
 ```
 
 `fetch` downloads GeoIP, every MISP feed that has a `url`, every STIX
@@ -39,7 +41,10 @@ the saved STIX bundle, and the context layer) and the overlay. `run`
 is fetch, then build. `lookup` queries the database named by `output`.
 `apply-delta` folds one segment into that database. A `.stix` or
 `.stix.json` segment is STIX. A `.misp.json` segment, and any other
-`.json` segment, is MISP. A `.csv` segment is CSV.
+`.json` segment, is MISP. A `.csv` segment is CSV. `sync` pages one
+MISP feed. The first pull, and `--full`, compiles through `build`.
+A later window is one `apply-delta` generation. The manual states
+the cursor, `--segment`, and `--follow`.
 
 MISP in the config, on its own:
 
