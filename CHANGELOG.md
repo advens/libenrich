@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+- `enrich sync` pages one MISP feed into `dest` and a `.cursor` file.
+  The first pull, and `--full`, compiles `output` through `build`.
+  A later window is one `apply-delta` generation. `--segment` folds a
+  file already on disk. `--follow` needs libzmq and exits 2 without it.
+  The on-disk `.thrt` layout is unchanged.
+
 ## [0.1.2]
 
 - `enrich` compiles a STIX 2.1 bundle, and a 2.0 indicator of the same

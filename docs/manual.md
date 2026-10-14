@@ -37,6 +37,9 @@ enrich -c enrich.json run
 enrich -c enrich.json lookup 203.0.113.50
 enrich -c enrich.json apply-delta --segment delta.csv --feed-key delta
 enrich -c enrich.json apply-delta --segment delta.stix.json --feed-key stix-delta
+enrich -c enrich.json sync
+enrich -c enrich.json sync --apply --hup
+enrich -c enrich.json sync --segment osint.csv --feed-key osint --apply --full --hup
 ```
 
 `fetch` downloads GeoIP, every MISP feed that has a `url`, every STIX
@@ -97,7 +100,8 @@ and renamed onto `dest`. `fetch` creates the directory that holds
 The request is one page. `limit` is 10000 and there is no `page`
 loop. Attributes past that page are not fetched and the command does
 not say so. Narrow `since`, or count the attributes in `dest`, before
-you treat the file as the whole window.
+you treat the file as the whole window. Paging that window is
+`enrich sync`, not `fetch`.
 
 The response is stored unchanged. `build` compiles these shapes:
 
@@ -169,6 +173,67 @@ that server. A hit prints `CTI` and a TLP word. A value you know is
 `to_ids` false, or whose type is not in the table, prints `NO MATCH.`
 `run` is `fetch`, then `build`. A feed with `path` and no `url` does
 not call the server. It compiles the file you already have.
+
+## Sync
+
+`sync` talks only to the MISP feed. It does not download GeoIP, a
+STIX bundle, or a UA or suffix table. It does not copy a file, call
+Fleet, or write a second database. `output` stays the database named
+in the config.
+
+```
+POST {url}/attributes/restSearch
+Authorization: <key>
+Accept: application/json
+Content-Type: application/json
+
+{"returnFormat":"json","last":"<window>","to_ids":1,"limit":2000,"page":1}
+```
+
+`limit` defaults to 2000 (`--page-size`). The next page is requested
+until a page is shorter than that limit. The pages are written as one
+attribute-search body. A pull that returns no attributes leaves
+`dest`, the cursor, and `output` unchanged.
+
+The cursor is `<dest>.cursor`. It holds the newest attribute
+`timestamp`, and that value is the next `last`. The first pull, and
+any `--full`, uses the config `since` (or `7d`) instead of the cursor.
+A failed pull leaves the previous `dest` and cursor in place.
+
+Without `--apply` the command stops after `dest` and the cursor. It
+does not change `output` and it does not signal rsyslog. With
+`--apply`, the first pull and any `--full` compile `output` through
+`build`. A later window is folded with `apply-delta --generation`.
+The generation is one higher than the value stored for that feed. A
+full body is not folded as a list of adds. On that later window,
+`deleted` true or `to_ids` false removes the indicator. A still-valid
+`to_ids` attribute is added. Type, confidence, TLP, and category stay
+the rules `build` already uses. A failed fold leaves the previous
+`dest`, cursor, and `output`, and does not signal.
+
+`--segment FILE` reads a file already on disk and needs no MISP key.
+Without `--apply` it does not change `output`. With `--apply` it
+folds that file. `--full` makes the fold a snapshot
+(`apply-delta --snapshot`), which is how a CSV that is not a
+configured feed replaces one feed key. `--feed-key` on a segment is
+that feed key. On a pull, `--feed-key` selects the MISP feed `name`.
+When it is omitted, a pull uses the first MISP feed that has a `dest`.
+
+`--hup` runs only after a fold that succeeded. On Linux the command
+is `systemctl kill -s HUP rsyslog`. Elsewhere it sends SIGHUP to
+`rsyslogd`. `--hup-cmd` replaces that command. A signal that fails
+does not undo the fold.
+
+`--follow` subscribes to the MISP ZeroMQ topic `misp_json_attribute`
+and folds one delta every `--flush-seconds` (default 300). `--zmq`
+defaults to `tcp://<misp host>:50000`. The socket is libzmq linked
+into this binary. A build without libzmq still runs every other flag,
+and `--follow` exits 2. There is no Python and no pyzmq.
+
+A test host runs `sync`, then `lookup`. The host that holds the key
+runs `sync` from cron, or `sync --follow --apply --hup` when that
+host runs rsyslog. A host with no key runs
+`sync --segment <file> --apply --hup`.
 
 ## STIX 2.1
 

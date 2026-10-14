@@ -230,6 +230,16 @@ static struct { feed_entry_t *items; size_t count; size_t cap; } feed_db = {0};
 /* Default source name (set per-file) */
 static char g_default_source[64] = "Unknown";
 
+/* enrich sync sets this around one incremental MISP fold. A full build
+ * leaves it off: to_ids false is skipped and deleted is not read.
+ * When it is on, deleted or to_ids false emits a '-' row. */
+static int g_misp_delta = 0;
+
+void thrt_misp_delta_mode(int on)
+{
+    g_misp_delta = on ? 1 : 0;
+}
+
 // Stats
 static struct {
     size_t ipv4_count; size_t ipv6_count; size_t domain_count;
@@ -1626,7 +1636,8 @@ static const char *parse_misp_tags(const char *p, const char *end,
  * Returns number of IOCs emitted (0 if skipped). */
 static int emit_misp_ioc(const char *misp_type, const char *value,
                           uint8_t confidence, uint16_t cat_mask,
-                          uint8_t tlp_mask, const char *tags_json) {
+                          uint8_t tlp_mask, const char *tags_json,
+                          char action) {
     const char *ioc_type = misp_type_to_ioc_type(misp_type);
     if (!ioc_type) return 0;
 
@@ -1641,6 +1652,7 @@ static int emit_misp_ioc(const char *misp_type, const char *value,
             *pipe = '\0';
             /* Emit domain (left of pipe) */
             normalized_ioc_v4_t ioc = {0};
+            ioc.action = action;
             snprintf(ioc.value, sizeof(ioc.value), "%s", vbuf);
             snprintf(ioc.type, sizeof(ioc.type), "%s", "domain");
             ioc.confidence = confidence;
@@ -1655,6 +1667,7 @@ static int emit_misp_ioc(const char *misp_type, const char *value,
             const char *ip_part = pipe + 1;
             if (ip_part[0]) {
                 memset(&ioc, 0, sizeof(ioc));
+                ioc.action = action;
                 snprintf(ioc.value, sizeof(ioc.value), "%s", ip_part);
                 snprintf(ioc.type, sizeof(ioc.type), "%s", "ip");
                 ioc.confidence = confidence;
@@ -1687,6 +1700,7 @@ static int emit_misp_ioc(const char *misp_type, const char *value,
     }
 
     normalized_ioc_v4_t ioc = {0};
+    ioc.action = action;
     snprintf(ioc.value, sizeof(ioc.value), "%s", clean_value);
     snprintf(ioc.type, sizeof(ioc.type), "%s", ioc_type);
     ioc.confidence = confidence;
@@ -1714,6 +1728,7 @@ static const char *parse_misp_attribute(const char *p, const char *end,
     char value[512] = "";
     char category[128] = "";
     int to_ids = 1; /* default: import */
+    int deleted = 0;
 
     /* Attribute-level TLP and tags */
     char attr_tlp[64] = "";
@@ -1756,6 +1771,12 @@ static const char *parse_misp_attribute(const char *p, const char *end,
             else
                 p = skip_json_val(p, end);
             break;
+        case 'd':
+            if (strcmp(key, "deleted") == 0)
+                p = extract_json_bool(p, end, &deleted);
+            else
+                p = skip_json_val(p, end);
+            break;
         case 'T':
             if (strcmp(key, "Tag") == 0)
                 p = parse_misp_tags(p, end, attr_tlp, sizeof(attr_tlp),
@@ -1772,15 +1793,18 @@ static const char *parse_misp_attribute(const char *p, const char *end,
 
     if (p < end && *p == '}') p++;
 
-    /* Skip non-IDS attributes */
-    if (!to_ids) {
+    /* A full build drops to_ids false and does not read deleted.
+     * An incremental sync fold turns either into a withdrawal. */
+    if (!g_misp_delta && !to_ids) {
         (*skipped)++;
         return p;
     }
-
-    /* Skip unsupported types */
     if (!misp_type_to_ioc_type(misp_type)) {
         (*skipped)++;
+        return p;
+    }
+    if (g_misp_delta && (deleted || !to_ids)) {
+        emit_misp_ioc(misp_type, value, 0, 0, 0, NULL, '-');
         return p;
     }
 
@@ -1821,7 +1845,7 @@ static const char *parse_misp_attribute(const char *p, const char *end,
     uint16_t cat_mask = misp_category_to_mask(category);
     const char *tags = (merged_pos > 2) ? merged_tags : NULL;
 
-    int n = emit_misp_ioc(misp_type, value, event_confidence, cat_mask, tlp, tags);
+    int n = emit_misp_ioc(misp_type, value, event_confidence, cat_mask, tlp, tags, '+');
     *emitted += n;
 
     return p;
