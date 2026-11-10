@@ -2641,6 +2641,7 @@ static void write_thrt(const char *filename) {
     thrt_hash_entry_t *ht;
     thrt_header_t hdr = {0};
     uint64_t offset;
+    size_t accel_pad;
     uint32_t checksum;
     /* --- Incremental: filter out deleted entries before building --- */
     if (g_delete_set && g_delete_set->count > 0) {
@@ -2735,6 +2736,10 @@ static void write_thrt(const char *filename) {
     hdr.offset_ipv6 = offset;      offset += ip6_db.count * sizeof(thrt_ipv6_range_t);
     hdr.offset_hashtable = offset; offset += hash_slots * sizeof(thrt_hash_entry_t);
     hdr.offset_strings = offset;   offset += str_pool.len;
+    /* The string pool has any length. Pad so the accelerator table starts
+     * on an 8-byte boundary. */
+    accel_pad = (size_t)((8 - (offset % 8)) % 8);
+    offset += accel_pad;
     hdr.offset_ip_accel = offset;  offset += sizeof(ip_accel_db);
     hdr.offset_bloom = offset;     offset += (bloom_size_bits / 8);
     hdr.offset_feeds = offset;     offset += feed_db.count * sizeof(thrt_feed_entry_t);
@@ -2781,6 +2786,10 @@ static void write_thrt(const char *filename) {
      * keeping the on-disk layout identical). */
     if (hash_slots > 0) fwrite(ht, sizeof(thrt_hash_entry_t), hash_slots, f);
     if (str_pool.len > 0) fwrite(str_pool.data, 1, str_pool.len, f);
+    if (accel_pad > 0) {
+        static const unsigned char zeros[8];
+        fwrite(zeros, 1, accel_pad, f);
+    }
 
     /* Write acceleration structures (ip_accel_db is a fixed array, never NULL) */
     fwrite(ip_accel_db, sizeof(ip_accel_db), 1, f);
