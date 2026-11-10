@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [0.1.4]
+
+- thrtutil, thrt_cli, and the shared headers build without warnings
+  under rsyslog's warning flags.
+- A STIX hash longer than its field is dropped instead of stored cut
+  off. A TLP marking whose name does not fit its field is not
+  registered, so an indicator that references it gets amber.
+- thrtutil pads the string pool so the IPv4 accelerator table starts
+  on an 8-byte boundary. A 0.1.3 reader loads the new files.
+  `thrt_lookup_ip_accel` copies each slot, so a file written by 0.1.3
+  loads without a misaligned access.
+
 ## [0.1.3]
 
 - `enrich sync` pages one MISP feed into `dest` and a `.cursor` file.
