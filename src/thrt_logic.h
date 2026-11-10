@@ -359,19 +359,26 @@ static inline thrt_metadata_t* thrt_lookup_ip(thrt_ipv4_range_t* table,
     return NULL;
 }
 
+// Read one accelerator slot. A file written before the table was aligned
+// can place it at any byte offset, so the slot is copied, not dereferenced.
+static inline thrt_ip_accel_t thrt_ip_accel_at(const void* accel, uint32_t idx) {
+    thrt_ip_accel_t entry;
+    memcpy(&entry, (const unsigned char*)accel + (size_t)idx * sizeof(entry), sizeof(entry));
+    return entry;
+}
+
 // Accelerated IPv4 Lookup
 static inline thrt_metadata_t* thrt_lookup_ip_accel(thrt_ipv4_range_t* ranges,
-                                                    thrt_ip_accel_t* accel,
+                                                    const void* accel,
                                                     thrt_metadata_t* meta_base,
                                                     uint32_t ip) {
     // 1. O(1) Jump to the correct /16 block
-    uint32_t idx = ip >> (32 - THRT_IP_ACCEL_BITS);
-    thrt_ip_accel_t* entry = &accel[idx];
+    thrt_ip_accel_t entry = thrt_ip_accel_at(accel, ip >> (32 - THRT_IP_ACCEL_BITS));
 
-    if (entry->range_count == 0) return NULL;
+    if (entry.range_count == 0) return NULL;
 
     // 2. O(log n) Search on small subset (usually < 100 items)
-    return thrt_lookup_ip(&ranges[entry->range_start_idx], entry->range_count, meta_base, ip);
+    return thrt_lookup_ip(&ranges[entry.range_start_idx], entry.range_count, meta_base, ip);
 }
 
 // IPv6 Lookup

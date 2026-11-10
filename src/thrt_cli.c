@@ -125,7 +125,7 @@ int main(int argc, char **argv) {
     thrt_ipv6_range_t *ip6_table;
     thrt_hash_entry_t *hash_table;
     char *str_pool;
-    thrt_ip_accel_t *ip_accel;
+    const void *ip_accel;
     uint8_t *bloom_base;
     thrt_metadata_t *res;
     struct in_addr addr;
@@ -166,7 +166,7 @@ int main(int argc, char **argv) {
     ip_accel = NULL;
     bloom_base = NULL;
     if (hdr->version >= 2) {
-        ip_accel = (thrt_ip_accel_t*)((char*)map + hdr->offset_ip_accel);
+        ip_accel = (const char*)map + hdr->offset_ip_accel;
         bloom_base = (uint8_t*)((char*)map + hdr->offset_bloom);
     }
 
