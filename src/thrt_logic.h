@@ -40,7 +40,7 @@
     #include <nmmintrin.h>  // SSE4.2
     #define THRT_HW_ACCEL 1
 
-static inline uint32_t crc32c_platform(uint32_t crc, const void* data, size_t len) {
+static inline __attribute__((always_inline)) uint32_t crc32c_platform(uint32_t crc, const void* data, size_t len) {
     const uint8_t* p = (const uint8_t*)data;
     while (len >= 8) {
         uint64_t chunk;
@@ -70,7 +70,7 @@ static inline uint32_t crc32c_platform(uint32_t crc, const void* data, size_t le
     #include <arm_acle.h>
     #define THRT_HW_ACCEL 1
 
-static inline uint32_t crc32c_platform(uint32_t crc, const void* data, size_t len) {
+static inline __attribute__((always_inline)) uint32_t crc32c_platform(uint32_t crc, const void* data, size_t len) {
     const uint8_t* p = (const uint8_t*)data;
     while (len >= 8) {
         uint64_t chunk;
@@ -111,7 +111,7 @@ static inline uint32_t crc32c_platform(uint32_t crc, const void* data, size_t le
         #warning \
             "enrich: hardware CRC32C disabled, using the scalar fallback (slow). Build with -march=armv8-a+crc (or a -mcpu that implies +crc) to enable it."
     #endif
-static inline uint32_t crc32c_platform(uint32_t crc, const void* data, size_t len) {
+static inline __attribute__((always_inline)) uint32_t crc32c_platform(uint32_t crc, const void* data, size_t len) {
     const uint8_t* p = (const uint8_t*)data;
     while (len--) {
         crc ^= *p++;
@@ -122,7 +122,7 @@ static inline uint32_t crc32c_platform(uint32_t crc, const void* data, size_t le
 #endif
 
 // CORE HASH FUNCTION
-static inline uint64_t thrt_hash(const char* str) {
+static inline __attribute__((always_inline)) uint64_t thrt_hash(const char* str) {
     // Initial Seed: 0xFFFFFFFF (Standard for CRC32C)
     // We invert the result (XOR) at the end to match Python/Go/Hardware
     return (uint64_t)(crc32c_platform(0xFFFFFFFF, str, strlen(str)) ^ 0xFFFFFFFF);
@@ -341,7 +341,7 @@ static inline bool thrt_bloom_check_fast(const uint8_t* bloom, uint32_t total_bi
 }
 
 // Legacy V1 Binary Search (needed by Accelerated Lookup)
-static inline thrt_metadata_t* thrt_lookup_ip(thrt_ipv4_range_t* table,
+static inline __attribute__((always_inline)) thrt_metadata_t* thrt_lookup_ip(thrt_ipv4_range_t* table,
                                               int count,
                                               thrt_metadata_t* meta_base,
                                               uint32_t ip) {
