@@ -173,6 +173,13 @@ static char *stix_dup_str(const char *p, const char *end, const char **after) {
     return buf;
 }
 
+/* Copy a hash value into its field. A value longer than the field is not a
+ * hash of that type, so the field is left empty instead of truncated. */
+static void stix_copy_hash(char *dst, size_t n, const char *val) {
+    int len = snprintf(dst, n, "%s", val);
+    if (len < 0 || (size_t)len >= n) dst[0] = '\0';
+}
+
 static const char *stix_hashes(const char *p, const char *end, stix_obj_t *o) {
     p = skip_ws(p, end);
     if (p >= end || *p != '{') return skip_json_val(p, end);
@@ -192,13 +199,13 @@ static const char *stix_hashes(const char *p, const char *end, stix_obj_t *o) {
         if (p >= end || *p != '"') { p = skip_json_val(p, end); continue; }
         p = extract_json_str(p, end, val, sizeof(val));
         if (strcasecmp(key, "MD5") == 0)
-            snprintf(o->hash_md5, sizeof(o->hash_md5), "%s", val);
+            stix_copy_hash(o->hash_md5, sizeof(o->hash_md5), val);
         else if (strcasecmp(key, "SHA-1") == 0 || strcasecmp(key, "SHA1") == 0)
-            snprintf(o->hash_sha1, sizeof(o->hash_sha1), "%s", val);
+            stix_copy_hash(o->hash_sha1, sizeof(o->hash_sha1), val);
         else if (strcasecmp(key, "SHA-256") == 0 || strcasecmp(key, "SHA256") == 0)
-            snprintf(o->hash_sha256, sizeof(o->hash_sha256), "%s", val);
+            stix_copy_hash(o->hash_sha256, sizeof(o->hash_sha256), val);
         else if (strcasecmp(key, "SHA-512") == 0 || strcasecmp(key, "SHA512") == 0)
-            snprintf(o->hash_sha512, sizeof(o->hash_sha512), "%s", val);
+            stix_copy_hash(o->hash_sha512, sizeof(o->hash_sha512), val);
     }
     if (p < end && *p == '}') p++;
     return p;
@@ -1006,9 +1013,11 @@ static void stix_index_one(const char *obj, const char *objend, void *ud) {
     }
     if (o.tlp_def[0] == '\0' && o.name[0] && strncasecmp(o.name, "TLP:", 4) == 0 &&
         strcmp(o.type, "marking-definition") == 0 && ix->nmarks < STIX_MARK_MAX) {
+        int n;
         snprintf(ix->marks[ix->nmarks].id, sizeof(ix->marks[0].id), "%s", o.id);
-        snprintf(ix->marks[ix->nmarks].tlp, sizeof(ix->marks[0].tlp), "%s", o.name + 4);
-        ix->nmarks++;
+        /* A TLP name too long for the field is not a TLP level. */
+        n = snprintf(ix->marks[ix->nmarks].tlp, sizeof(ix->marks[0].tlp), "%s", o.name + 4);
+        if (n >= 0 && (size_t)n < sizeof(ix->marks[0].tlp)) ix->nmarks++;
     }
     stix_obj_free(&o);
 }

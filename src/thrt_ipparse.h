@@ -48,10 +48,12 @@ typedef struct {
  * whole suffix is digits and the value is within [0, max]. Rejects an empty
  * suffix, a leading sign or space, trailing junk, and out-of-range values. */
 static inline int parse_prefix_len(const char* s, int max, int* out) {
+    char* end;
+    long v;
     if (!s || !isdigit((unsigned char)*s)) return 0;
-    char* end = NULL;
+    end = NULL;
     errno = 0;
-    long v = strtol(s, &end, 10);
+    v = strtol(s, &end, 10);
     if (errno != 0 || end == s || *end != '\0') return 0;
     if (v < 0 || v > max) return 0;
     *out = (int)v;
@@ -71,25 +73,30 @@ static inline int parse_prefix_len(const char* s, int max, int* out) {
 static inline int parse_ip_or_cidr(const char* value, int allow_cidr, parsed_ip_t* out) {
     struct in_addr a4;
     struct in6_addr a6;
+    const char* slash;
 
     if (!value || !*value || !out) return 0;
     memset(out, 0, sizeof(*out));
 
-    const char* slash = strchr(value, '/');
+    slash = strchr(value, '/');
     if (slash) {
-        if (!allow_cidr) return 0;
         char netbuf[64];
-        size_t nlen = (size_t)(slash - value);
+        size_t nlen;
+        int prefix;
+        if (!allow_cidr) return 0;
+        nlen = (size_t)(slash - value);
         if (nlen == 0 || nlen >= sizeof(netbuf)) return 0;
         memcpy(netbuf, value, nlen);
         netbuf[nlen] = '\0';
 
-        int prefix = 0;
+        prefix = 0;
         if (inet_pton(AF_INET, netbuf, &a4) == 1) {
+            uint32_t net;
+            uint32_t mask;
             if (!parse_prefix_len(slash + 1, 32, &prefix)) return 0;
             if (prefix < THRT_MIN_IPV4_PREFIX) return 0;
-            uint32_t net = ntohl(a4.s_addr);
-            uint32_t mask = (prefix == 0) ? 0u : (0xFFFFFFFFu << (32 - prefix));
+            net = ntohl(a4.s_addr);
+            mask = (prefix == 0) ? 0u : (0xFFFFFFFFu << (32 - prefix));
             out->family = 4;
             out->v4_start = net & mask;
             out->v4_end = out->v4_start | ~mask;

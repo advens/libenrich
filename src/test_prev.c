@@ -30,9 +30,11 @@ static int g_fail = 0;
 static int prev_insert(
     prev_entry_t* table, uint32_t slots, const char* key, uint32_t count, uint16_t edges, uint16_t sources) {
     uint64_t hash = prev_hash(key);
+    uint32_t mask;
+    uint32_t idx;
     if (hash == 0) hash = 1;
-    uint32_t mask = slots - 1;
-    uint32_t idx = (uint32_t)hash & mask;
+    mask = slots - 1;
+    idx = (uint32_t)hash & mask;
     for (uint32_t probes = 0; probes < slots; probes++) {
         prev_entry_t* e = &table[idx];
         if (e->hash_key == 0 || e->hash_key == hash) {
@@ -72,14 +74,18 @@ static void* build_table(uint32_t slots, size_t* out_len) {
  * reader byte-for-byte, incl. the FNV-1a hash). Returns 0 on success. */
 static int conformance(const char* path) {
     FILE* f = fopen(path, "rb");
+    long sz;
+    uint8_t* buf;
+    uint32_t slots;
+    const prev_entry_t* t;
     if (!f) {
         fprintf(stderr, "conformance: cannot open %s\n", path);
         return 1;
     }
     fseek(f, 0, SEEK_END);
-    long sz = ftell(f);
+    sz = ftell(f);
     fseek(f, 0, SEEK_SET);
-    uint8_t* buf = malloc((size_t)sz);
+    buf = malloc((size_t)sz);
     if (fread(buf, 1, (size_t)sz, f) != (size_t)sz) {
         fclose(f);
         free(buf);
@@ -87,18 +93,19 @@ static int conformance(const char* path) {
     }
     fclose(f);
 
-    uint32_t slots = 0;
-    const prev_entry_t* t = prev_table_map(buf, (size_t)sz, &slots);
+    slots = 0;
+    t = prev_table_map(buf, (size_t)sz, &slots);
     CHECK(t != NULL, "conformance: python-written table maps");
     if (t) {
         uint16_t e = 0, s = 0;
+        const prev_header_t* hh;
         CHECK(prev_lookup(t, slots, "www.google.com", &e, &s) == 50000 && e == 7 && s == 120, "conf: google");
         CHECK(prev_lookup(t, slots, "cdn.cloudflare.net", &e, &s) == 41000 && e == 7 && s == 95, "conf: cloudflare");
         CHECK(prev_lookup(t, slots, "one.one.one.one", &e, &s) == 12000 && e == 6 && s == 60, "conf: quad-one");
         CHECK(prev_lookup(t, slots, "internal.corp.lan", &e, &s) == 800 && e == 3 && s == 12, "conf: internal");
         CHECK(prev_lookup(t, slots, "lonely-beacon.example", &e, &s) == 2 && e == 1 && s == 1, "conf: rare");
         CHECK(prev_lookup(t, slots, "never-seen.invalid", &e, &s) == 0 && s == 0, "conf: absent => 0");
-        const prev_header_t* hh = (const prev_header_t*)buf;
+        hh = (const prev_header_t*)buf;
         CHECK(hh->entry_count == 5, "conf: entry_count");
         CHECK(hh->count_max == 50000, "conf: count_max");
         CHECK(hh->reporting_edges == 0, "conf: reporting_edges default unknown");
@@ -114,12 +121,14 @@ static int conformance(const char* path) {
 }
 
 int main(int argc, char** argv) {
-    if (argc > 1) return conformance(argv[1]);
-    size_t len = 0;
-    void* base = build_table(1024, &len);
-    prev_header_t* h = (prev_header_t*)base;
-    prev_entry_t* tbl = (prev_entry_t*)((uint8_t*)base + h->offset_entries);
-
+    size_t len;
+    void* base;
+    prev_header_t* h;
+    prev_entry_t* tbl;
+    uint32_t slots;
+    const prev_entry_t* mapped;
+    uint32_t s2;
+    prev_header_t bad;
     /* Common fleet observables (high counts) + one rare-but-present. */
     struct {
         const char* k;
@@ -130,6 +139,13 @@ int main(int argc, char** argv) {
         {"www.google.com", 50000, 7, 120}, {"cdn.cloudflare.net", 41000, 7, 95}, {"one.one.one.one", 12000, 6, 60},
         {"internal.corp.lan", 800, 3, 12}, {"lonely-beacon.example", 2, 1, 1}, /* present but very rare (one source) */
     };
+    uint16_t edges = 0xFFFF, srcs = 0xFFFF;
+    if (argc > 1) return conformance(argv[1]);
+    len = 0;
+    base = build_table(1024, &len);
+    h = (prev_header_t*)base;
+    tbl = (prev_entry_t*)((uint8_t*)base + h->offset_entries);
+
     for (size_t i = 0; i < sizeof(seed) / sizeof(seed[0]); i++) {
         CHECK(prev_insert(tbl, h->hash_slots, seed[i].k, seed[i].c, seed[i].e, seed[i].s) == 0, "insert");
         h->entry_count++;
@@ -137,14 +153,13 @@ int main(int argc, char** argv) {
     }
 
     /* map + validate */
-    uint32_t slots = 0;
-    const prev_entry_t* mapped = prev_table_map(base, len, &slots);
+    slots = 0;
+    mapped = prev_table_map(base, len, &slots);
     CHECK(mapped != NULL, "prev_table_map accepts a valid table");
     CHECK(slots == 1024, "slot count round-trips");
     CHECK(mapped == tbl, "entry array offset resolves");
 
     /* hits return the stored count + edge spread + source spread */
-    uint16_t edges = 0xFFFF, srcs = 0xFFFF;
     CHECK(prev_lookup(mapped, slots, "www.google.com", &edges, &srcs) == 50000, "common hit count");
     CHECK(edges == 7, "common hit edge spread");
     CHECK(srcs == 120, "common hit source spread");
@@ -164,8 +179,8 @@ int main(int argc, char** argv) {
     CHECK(prev_lookup(mapped, 0, "x", NULL, NULL) == 0, "zero-slot guard");
 
     /* corruption rejection */
-    uint32_t s2 = 0;
-    prev_header_t bad = *h;
+    s2 = 0;
+    bad = *h;
     bad.magic = 0xDEADBEEF;
     CHECK(prev_table_map(&bad, len, &s2) == NULL, "bad magic rejected");
     bad = *h;

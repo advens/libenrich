@@ -152,13 +152,18 @@ static inline uint32_t thrt_parse_ipv4_fast(const char* s, size_t len) {
 
 // Fast IPv6 parser
 static inline bool thrt_parse_ipv6_fast(const char* src, size_t len, uint8_t* dst) {
+    const char* p;
+    const char* end;
+    int idx;
+    int double_colon_idx;
     memset(dst, 0, 16);
-    const char* p = src;
-    const char* end = src + len;
-    int idx = 0;
-    int double_colon_idx = -1;
+    p = src;
+    end = src + len;
+    idx = 0;
+    double_colon_idx = -1;
 
     while (p < end && idx < 8) {
+        uint16_t val;
         // Handle double colon '::'
         if (*p == ':') {
             if (p + 1 < end && *(p + 1) == ':') {
@@ -172,7 +177,7 @@ static inline bool thrt_parse_ipv6_fast(const char* src, size_t len, uint8_t* ds
         }
 
         // Parse Hextet
-        uint16_t val = 0;
+        val = 0;
         while (p < end) {
             char c = *p;
             int v = -1;
@@ -230,25 +235,30 @@ static inline bool thrt_parse_ipv6_fast(const char* src, size_t len, uint8_t* ds
 
 /* Standard bloom check - optimized for early exit */
 static inline bool thrt_bloom_check(const uint8_t* bloom, uint32_t total_bits, uint64_t hash) {
+    uint32_t h1;
+    uint32_t h2;
+    uint32_t idx0;
+    uint32_t idx1;
+    uint32_t idx2;
     if (!bloom || !total_bits) return true;  // Fail open
 
-    uint32_t h1 = (uint32_t)hash;
-    uint32_t h2 = (uint32_t)((hash >> 32) | (hash << 32));
+    h1 = (uint32_t)hash;
+    h2 = (uint32_t)((hash >> 32) | (hash << 32));
 
     // Check bit 0
-    uint32_t idx0 = h1 % total_bits;
+    idx0 = h1 % total_bits;
     if (!(bloom[idx0 >> 3] & (1 << (idx0 & 7)))) {
         return false;  // Early exit - most common case
     }
 
     // Check bit 1
-    uint32_t idx1 = (h1 + h2) % total_bits;
+    idx1 = (h1 + h2) % total_bits;
     if (!(bloom[idx1 >> 3] & (1 << (idx1 & 7)))) {
         return false;
     }
 
     // Check bit 2
-    uint32_t idx2 = (h1 + (h2 << 1)) % total_bits;
+    idx2 = (h1 + (h2 << 1)) % total_bits;
     return (bloom[idx2 >> 3] & (1 << (idx2 & 7))) != 0;
 }
 
@@ -267,6 +277,9 @@ static inline void thrt_bloom_check_batch(
         uint64_t hash = hashes[i];
         uint32_t h1 = (uint32_t)hash;
         uint32_t h2 = (uint32_t)((hash >> 32) | (hash << 32));
+        uint32_t idx0;
+        uint32_t idx1;
+        uint32_t idx2;
 
         // Prefetch next hash's first location
         if (i + 1 < count) {
@@ -277,19 +290,19 @@ static inline void thrt_bloom_check_batch(
         }
 
         // Check current hash
-        uint32_t idx0 = h1 % total_bits;
+        idx0 = h1 % total_bits;
         if (!(bloom[idx0 >> 3] & (1 << (idx0 & 7)))) {
             results[i] = false;
             continue;
         }
 
-        uint32_t idx1 = (h1 + h2) % total_bits;
+        idx1 = (h1 + h2) % total_bits;
         if (!(bloom[idx1 >> 3] & (1 << (idx1 & 7)))) {
             results[i] = false;
             continue;
         }
 
-        uint32_t idx2 = (h1 + (h2 << 1)) % total_bits;
+        idx2 = (h1 + (h2 << 1)) % total_bits;
         results[i] = (bloom[idx2 >> 3] & (1 << (idx2 & 7))) != 0;
     }
 }
@@ -298,6 +311,12 @@ static inline void thrt_bloom_check_batch(
  * Only works if h2 is carefully chosen to avoid collisions
  */
 static inline bool thrt_bloom_check_fast(const uint8_t* bloom, uint32_t total_bits, uint64_t hash) {
+    uint32_t mask;
+    uint32_t h1;
+    uint32_t h2;
+    uint32_t idx0;
+    uint32_t idx1;
+    uint32_t idx2;
     if (!bloom || !total_bits) return true;
 
     // Ensure total_bits is power of 2 for fast modulo
@@ -306,18 +325,18 @@ static inline bool thrt_bloom_check_fast(const uint8_t* bloom, uint32_t total_bi
         return thrt_bloom_check(bloom, total_bits, hash);
     }
 
-    uint32_t mask = total_bits - 1;
-    uint32_t h1 = (uint32_t)hash;
-    uint32_t h2 = (uint32_t)(hash >> 32);
+    mask = total_bits - 1;
+    h1 = (uint32_t)hash;
+    h2 = (uint32_t)(hash >> 32);
 
     // Fast modulo using bitwise AND
-    uint32_t idx0 = h1 & mask;
+    idx0 = h1 & mask;
     if (!(bloom[idx0 >> 3] & (1 << (idx0 & 7)))) return false;
 
-    uint32_t idx1 = (h1 + h2) & mask;
+    idx1 = (h1 + h2) & mask;
     if (!(bloom[idx1 >> 3] & (1 << (idx1 & 7)))) return false;
 
-    uint32_t idx2 = (h1 + (h2 << 1)) & mask;
+    idx2 = (h1 + (h2 << 1)) & mask;
     return (bloom[idx2 >> 3] & (1 << (idx2 & 7))) != 0;
 }
 
@@ -406,9 +425,9 @@ static inline bool thrt_is_private_ipv4(uint32_t ip) {
 static inline bool thrt_is_private_ipv6(const uint8_t* ip) {
     /* ::1 (loopback) */
     static const uint8_t loopback[16] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
+    static const uint8_t unspec[16] = {0};
     if (memcmp(ip, loopback, 16) == 0) return true;
     /* :: (unspecified) */
-    static const uint8_t unspec[16] = {0};
     if (memcmp(ip, unspec, 16) == 0) return true;
     /* fe80::/10 (link-local) */
     if (ip[0] == 0xFE && (ip[1] & 0xC0) == 0x80) return true;
