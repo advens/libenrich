@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+## [0.1.5]
+
+- `thrt_overlay_load` and `parse_ip_or_cidr` are no longer declared
+  inline, and `thrt_hash`, `thrt_lookup_ip`, and `crc32c_platform` are
+  always inlined, so the headers build without `-Winline` warnings.
+  Lookup results are unchanged.
+
 ## [0.1.4]
 
 - thrtutil, thrt_cli, and the shared headers build without warnings
