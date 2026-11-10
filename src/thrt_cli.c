@@ -73,7 +73,7 @@ static const cat_entry_t g_categories[] = {
     { 0, NULL, NULL }
 };
 
-void print_categories(uint16_t mask) {
+static void print_categories(uint16_t mask) {
     int first = 1;
     for (const cat_entry_t *c = g_categories; c->name; c++) {
         if (mask & c->flag) {
@@ -85,7 +85,7 @@ void print_categories(uint16_t mask) {
     printf(" (0x%04x)", mask);
 }
 
-void print_feeds(uint64_t mask) {
+static void print_feeds(uint64_t mask) {
     int first = 1;
     for (uint32_t i = 0; i < g_feed_count && i < 64; i++) {
         if (mask & (1ULL << i)) {
@@ -96,7 +96,7 @@ void print_feeds(uint64_t mask) {
     if (first) printf("(none)");
 }
 
-void print_tlp(uint8_t mask) {
+static void print_tlp(uint8_t mask) {
     int first = 1;
     if (mask & THRT_TLP_CLEAR) { printf("%s%sWHITE%s", first ? "" : ", ", COL_WHITE, COL_RESET); first = 0; }
     if (mask & THRT_TLP_GREEN) { printf("%s%sGREEN%s", first ? "" : ", ", COL_GREEN, COL_RESET); first = 0; }
@@ -105,7 +105,7 @@ void print_tlp(uint8_t mask) {
     if (first) printf("UNK");
 }
 
-void print_type(uint8_t mask) {
+static void print_type(uint8_t mask) {
     int first = 1;
     if (mask & THRT_TYPE_CTI)   { printf("%sCTI",   first ? "" : "+"); first = 0; }
     if (mask & THRT_TYPE_CTI_R) { printf("%sCTI_R", first ? "" : "+"); first = 0; }
@@ -114,23 +114,38 @@ void print_type(uint8_t mask) {
 }
 
 int main(int argc, char **argv) {
+    const char *path;
+    const char *key;
+    int fd;
+    struct stat sb;
+    void *map;
+    thrt_header_t *hdr;
+    thrt_metadata_t *meta_base;
+    thrt_ipv4_range_t *ip_table;
+    thrt_ipv6_range_t *ip6_table;
+    thrt_hash_entry_t *hash_table;
+    char *str_pool;
+    thrt_ip_accel_t *ip_accel;
+    uint8_t *bloom_base;
+    thrt_metadata_t *res;
+    struct in_addr addr;
+    struct in6_addr addr6;
     if (argc < 3) {
         printf("Usage: %s <feed.thrt> <ioc_to_check>\n", argv[0]);
         return 1;
     }
 
-    const char *path = argv[1];
-    const char *key = argv[2];
+    path = argv[1];
+    key = argv[2];
 
-    int fd = open(path, O_RDONLY);
+    fd = open(path, O_RDONLY);
     if (fd < 0) { perror("open"); return 1; }
 
-    struct stat sb;
     fstat(fd, &sb);
-    void *map = mmap(NULL, sb.st_size, PROT_READ, MAP_SHARED, fd, 0);
+    map = mmap(NULL, sb.st_size, PROT_READ, MAP_SHARED, fd, 0);
     if (map == MAP_FAILED) { perror("mmap"); return 1; }
 
-    thrt_header_t *hdr = (thrt_header_t*)map;
+    hdr = (thrt_header_t*)map;
     if (hdr->magic != THRT_MAGIC) { printf("Invalid Magic\n"); return 1; }
     if (hdr->version < THRT_VERSION) {
         printf("%s Database is v%d - v%d required. Rebuild with thrtutil.\n",
@@ -141,15 +156,15 @@ int main(int argc, char **argv) {
     printf("%s %sDB Loaded:%s %s (v%d)\n", ICON_DB, COL_BOLD, COL_RESET, path, hdr->version);
 
     // Base Pointers
-    thrt_metadata_t *meta_base = (thrt_metadata_t*)((char*)map + hdr->offset_metadata);
-    thrt_ipv4_range_t *ip_table = (thrt_ipv4_range_t*)((char*)map + hdr->offset_ipv4);
-    thrt_ipv6_range_t *ip6_table = (thrt_ipv6_range_t*)((char*)map + hdr->offset_ipv6);
-    thrt_hash_entry_t *hash_table = (thrt_hash_entry_t*)((char*)map + hdr->offset_hashtable);
-    char *str_pool = (char*)map + hdr->offset_strings;
+    meta_base = (thrt_metadata_t*)((char*)map + hdr->offset_metadata);
+    ip_table = (thrt_ipv4_range_t*)((char*)map + hdr->offset_ipv4);
+    ip6_table = (thrt_ipv6_range_t*)((char*)map + hdr->offset_ipv6);
+    hash_table = (thrt_hash_entry_t*)((char*)map + hdr->offset_hashtable);
+    str_pool = (char*)map + hdr->offset_strings;
 
     // V2 Pointers
-    thrt_ip_accel_t *ip_accel = NULL;
-    uint8_t *bloom_base = NULL;
+    ip_accel = NULL;
+    bloom_base = NULL;
     if (hdr->version >= 2) {
         ip_accel = (thrt_ip_accel_t*)((char*)map + hdr->offset_ip_accel);
         bloom_base = (uint8_t*)((char*)map + hdr->offset_bloom);
@@ -163,15 +178,14 @@ int main(int argc, char **argv) {
     }
 
     // Logic
-    thrt_metadata_t *res = NULL;
-    struct in_addr addr;
-    struct in6_addr addr6;
+    res = NULL;
 
     printf("\nChecking: %s%s%s\n", COL_CYAN, key, COL_RESET);
 
     if (inet_pton(AF_INET, key, &addr)) {
+        uint32_t ip;
         printf("[*] Type: IPv4\n");
-        uint32_t ip = ntohl(addr.s_addr);
+        ip = ntohl(addr.s_addr);
 
         if (ip_accel) {
             printf("[*] Using Acceleration Table\n");
@@ -186,8 +200,9 @@ int main(int argc, char **argv) {
         res = thrt_lookup_ipv6(ip6_table, hdr->ipv6_range_count, meta_base, addr6.s6_addr);
 
     } else {
+        uint64_t hash;
         printf("[*] Type: String\n");
-        uint64_t hash = thrt_hash(key);
+        hash = thrt_hash(key);
         //printf("[*] Hash: %" PRIx64 "\n", hash);
 
         if (bloom_base) {

@@ -53,11 +53,6 @@ static void accept_v4(const char* value, uint32_t start, uint32_t end) {
 #define V4(a, b, c, d) (((uint32_t)(a) << 24) | ((b) << 16) | ((c) << 8) | (d))
 
 int main(void) {
-    printf("thrt_ipparse regression\n");
-
-    /* 1. The exact feed values that poisoned the database. Every one of these
-     *    previously became 0.0.0.0/0. */
-    printf("scheme-less URL indicators must never become networks\n");
     const char* poison[] = {
         "103.117.72.60/ptj",
         "185.70.186.145/gate.php",
@@ -76,6 +71,13 @@ int main(void) {
         "1.2.3.4/0x10",
         "1.2.3.4/33", /* out of range for v4 */
     };
+    parsed_ip_t ip6;
+    parsed_ip_t ip;
+    printf("thrt_ipparse regression\n");
+
+    /* 1. The exact feed values that poisoned the database. Every one of these
+     *    previously became 0.0.0.0/0. */
+    printf("scheme-less URL indicators must never become networks\n");
     for (size_t i = 0; i < sizeof(poison) / sizeof(*poison); i++) reject(poison[i], 1);
 
     /* 2. The wildcard guard: even a syntactically valid prefix must not blanket
@@ -96,7 +98,6 @@ int main(void) {
     accept_v4("203.0.113.7", V4(203, 0, 113, 7), V4(203, 0, 113, 7));
     accept_v4("203.0.113.7/32", V4(203, 0, 113, 7), V4(203, 0, 113, 7));
 
-    parsed_ip_t ip6;
     check(parse_ip_or_cidr("2001:db8::/32", 1, &ip6) && ip6.family == 6, "2001:db8::/32 accepted");
     check(parse_ip_or_cidr("2001:db8::1", 1, &ip6) && ip6.family == 6, "bare v6 accepted");
 
@@ -104,7 +105,6 @@ int main(void) {
      *    path, but a bare address is still indexable whatever the type says. */
     printf("declared type gates the slash form\n");
     reject("192.168.1.0/24", 0);
-    parsed_ip_t ip;
     check(parse_ip_or_cidr("203.0.113.7", 0, &ip) && ip.family == 4, "bare address accepted with allow_cidr=0");
 
     check(ioc_type_is_ip("ip") && ioc_type_is_ip("cidr") && ioc_type_is_ip(NULL) && ioc_type_is_ip(""),

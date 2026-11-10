@@ -182,14 +182,16 @@ static void delete_set_init(void) {
 }
 
 static void delete_set_add(uint64_t hash) {
+    uint32_t bucket;
+    delete_entry_t *entry;
     if (!g_delete_set) delete_set_init();
-    uint32_t bucket = hash % DELETE_SET_BUCKETS;
+    bucket = hash % DELETE_SET_BUCKETS;
 
     for (delete_entry_t *e = g_delete_set->buckets[bucket]; e; e = e->next) {
         if (e->hash == hash) return;
     }
 
-    delete_entry_t *entry = xmalloc(sizeof(delete_entry_t));
+    entry = xmalloc(sizeof(delete_entry_t));
     entry->hash = hash;
     entry->next = g_delete_set->buckets[bucket];
     g_delete_set->buckets[bucket] = entry;
@@ -197,8 +199,9 @@ static void delete_set_add(uint64_t hash) {
 }
 
 static int delete_set_contains(uint64_t hash) {
+    uint32_t bucket;
     if (!g_delete_set) return 0;
-    uint32_t bucket = hash % DELETE_SET_BUCKETS;
+    bucket = hash % DELETE_SET_BUCKETS;
     for (delete_entry_t *e = g_delete_set->buckets[bucket]; e; e = e->next) {
         if (e->hash == hash) return 1;
     }
@@ -235,6 +238,7 @@ static char g_default_source[64] = "Unknown";
  * When it is on, deleted or to_ids false emits a '-' row. */
 static int g_misp_delta = 0;
 
+void thrt_misp_delta_mode(int on);
 void thrt_misp_delta_mode(int on)
 {
     g_misp_delta = on ? 1 : 0;
@@ -255,10 +259,11 @@ static int g_verbose = 0;
 static int g_incremental = 0;
 
 /* --- Helpers --- */
-char* trim(char* str) {
+static char* trim(char* str) {
+    char* end;
     while(isspace((unsigned char)*str)) str++;
     if(*str == 0) return str;
-    char* end = str + strlen(str) - 1;
+    end = str + strlen(str) - 1;
     while(end > str && (isspace((unsigned char)*end) || *end == '"' || *end == '\'')) end--;
     *(end+1) = 0;
     if(*str == '"' || *str == '\'') str++;
@@ -308,6 +313,7 @@ static void str_pool_reserve_sentinel(void) {
 
 /* --- Helper: Get/Create Feed Index (returns bitmask position 0-63) --- */
 static uint8_t get_feed_idx(const char* name) {
+    uint8_t idx;
     if (!name || strlen(name) == 0) name = "Unknown";
 
     /* Search existing */
@@ -324,7 +330,7 @@ static uint8_t get_feed_idx(const char* name) {
     }
 
     ensure_capacity();
-    uint8_t idx = (uint8_t)feed_db.count;
+    idx = (uint8_t)feed_db.count;
     snprintf(feed_db.items[feed_db.count].name, THRT_FEED_NAME_MAX, "%s", name);
     feed_db.items[feed_db.count].feed_idx = idx;
     feed_db.count++;
@@ -343,6 +349,7 @@ static uint8_t parse_tlp_mask(const char* s) {
 
 /* --- Helper: Parse Category to bitmask --- */
 static uint16_t parse_category_mask(const char* s) {
+    uint16_t mask;
     if (!s) return THRT_CAT_UNKNOWN;
     if (isdigit((unsigned char)s[0])) {
         int cat = atoi(s);
@@ -350,7 +357,7 @@ static uint16_t parse_category_mask(const char* s) {
         return THRT_CAT_UNKNOWN;
     }
 
-    uint16_t mask = 0;
+    mask = 0;
 
     if (strcasestr(s, "malicious-activity") || strcasestr(s, "attack"))
         mask |= THRT_CAT_ATTACK;
@@ -446,6 +453,10 @@ static uint32_t add_meta_v4(uint8_t confidence, uint8_t type_mask, uint8_t tlp_m
                             const char *tags_json) {
     uint32_t tags_offset = 0;
     uint32_t tags_length = 0;
+    uint64_t dedup_key;
+    uint32_t bucket;
+    uint32_t idx;
+    meta_dedup_entry_t *entry;
 
     /* Store tags JSON in string pool if present */
     if (tags_json && tags_json[0] != '\0') {
@@ -457,11 +468,11 @@ static uint32_t add_meta_v4(uint8_t confidence, uint8_t type_mask, uint8_t tlp_m
     }
 
     /* Build a dedup key by hashing all metadata fields + tags content. */
-    uint64_t dedup_key = meta_make_key(confidence, type_mask, tlp_mask,
+    dedup_key = meta_make_key(confidence, type_mask, tlp_mask,
                                        category_mask, feed_mask, tags_json);
 
     /* Lookup in hash table */
-    uint32_t bucket = (uint32_t)(dedup_key % META_DEDUP_BUCKETS);
+    bucket = (uint32_t)(dedup_key % META_DEDUP_BUCKETS);
     for (meta_dedup_entry_t *e = meta_dedup_ht[bucket]; e; e = e->next) {
         if (e->key == dedup_key) {
             /* Verify fields match (handle hash collision) */
@@ -482,7 +493,7 @@ static uint32_t add_meta_v4(uint8_t confidence, uint8_t type_mask, uint8_t tlp_m
 
     /* Add new metadata entry */
     ensure_capacity();
-    uint32_t idx = meta_db.count;
+    idx = meta_db.count;
     meta_db.items[idx] = (builder_meta_v4_t){
         .confidence = confidence,
         .type_mask = type_mask,
@@ -495,7 +506,7 @@ static uint32_t add_meta_v4(uint8_t confidence, uint8_t type_mask, uint8_t tlp_m
     meta_db.count++;
 
     /* Insert into dedup hash table */
-    meta_dedup_entry_t *entry = xmalloc(sizeof(meta_dedup_entry_t));
+    entry = xmalloc(sizeof(meta_dedup_entry_t));
     entry->key = dedup_key;
     entry->meta_idx = idx;
     entry->next = meta_dedup_ht[bucket];
@@ -583,16 +594,24 @@ static uint32_t *ioc_meta_slot(uint8_t kind, uint32_t index) {
  * Scalar fields are copied to locals + tags to a stack buffer BEFORE calling
  * add_meta_v4 (which may realloc meta_db, invalidating a/b). */
 static uint32_t merge_meta(uint32_t a_idx, uint32_t b_idx) {
+    builder_meta_v4_t *a;
+    builder_meta_v4_t *b;
+    uint8_t  conf;
+    uint8_t  type;
+    uint8_t  tlp;
+    uint16_t cat;
+    uint64_t feeds;
+    char tagbuf[MAX_TAGS_JSON];
     if (a_idx == b_idx) return a_idx;
     if (a_idx >= meta_db.count || b_idx >= meta_db.count) return a_idx;
-    builder_meta_v4_t *a = &meta_db.items[a_idx];
-    builder_meta_v4_t *b = &meta_db.items[b_idx];
-    uint8_t  conf = a->confidence > b->confidence ? a->confidence : b->confidence;
-    uint8_t  type = a->type_mask | b->type_mask;
-    uint8_t  tlp  = a->tlp_mask  | b->tlp_mask;
-    uint16_t cat  = (uint16_t)(a->category_mask | b->category_mask);
-    uint64_t feeds = a->feed_mask | b->feed_mask;
-    char tagbuf[MAX_TAGS_JSON]; tagbuf[0] = '\0';
+    a = &meta_db.items[a_idx];
+    b = &meta_db.items[b_idx];
+    conf = a->confidence > b->confidence ? a->confidence : b->confidence;
+    type = a->type_mask | b->type_mask;
+    tlp = a->tlp_mask  | b->tlp_mask;
+    cat = (uint16_t)(a->category_mask | b->category_mask);
+    feeds = a->feed_mask | b->feed_mask;
+     tagbuf[0] = '\0';
     if (a->tags_length && a->tags_length < MAX_TAGS_JSON) {
         memcpy(tagbuf, str_pool.data + a->tags_offset, a->tags_length);
         tagbuf[a->tags_length] = '\0';
@@ -606,10 +625,12 @@ static uint32_t merge_meta(uint32_t a_idx, uint32_t b_idx) {
 /* Returns 1 if the caller should append a NEW IOC row; 0 if the IOC was a
  * duplicate (feed metadata merged into the existing row, no new row). */
 static int ioc_dedup_pre_add(uint64_t key, uint32_t meta_idx) {
+    ioc_dedup_entry_t *e;
+    uint32_t *slot;
     if (!g_ioc_dedup_active) return 1;
-    ioc_dedup_entry_t *e = ioc_dedup_find(key);
+    e = ioc_dedup_find(key);
     if (!e) return 1;
-    uint32_t *slot = ioc_meta_slot(e->kind, e->index);
+    slot = ioc_meta_slot(e->kind, e->index);
     if (slot) *slot = merge_meta(*slot, meta_idx);
     return 0;
 }
@@ -641,21 +662,24 @@ static void add_ioc(const char* value, const char* type, uint32_t meta_idx) {
      * through to the string table, where a value like "1.2.3.4/admin.php" is
      * still matchable as the URL it actually is. */
     if (parse_ip_or_cidr(value, ioc_type_is_ip(type), &ip)) {
+        uint64_t key;
+        uint32_t idx;
+        builder_ipv6_t *e;
         if (ip.family == 4) {
-            uint64_t key = ioc_key_ipv4(ip.v4_start, ip.v4_end);
+            key = ioc_key_ipv4(ip.v4_start, ip.v4_end);
             if (!ioc_dedup_pre_add(key, meta_idx)) return;
             ensure_capacity();
-            uint32_t idx = (uint32_t)ip_db.count;
+            idx = (uint32_t)ip_db.count;
             ip_db.items[ip_db.count++] = (builder_ip_t){ ip.v4_start, ip.v4_end, meta_idx };
             ioc_dedup_commit(key, IOC_KIND_IPV4, idx);
             stats.ipv4_count++;
             return;
         }
-        uint64_t key = ioc_key_ipv6(ip.v6_start, ip.v6_end);
+        key = ioc_key_ipv6(ip.v6_start, ip.v6_end);
         if (!ioc_dedup_pre_add(key, meta_idx)) return;
         ensure_capacity();
-        uint32_t idx = (uint32_t)ip6_db.count;
-        builder_ipv6_t *e = &ip6_db.items[ip6_db.count];
+        idx = (uint32_t)ip6_db.count;
+        e = &ip6_db.items[ip6_db.count];
         memcpy(e->start, ip.v6_start, 16);
         memcpy(e->end, ip.v6_end, 16);
         e->meta_idx = meta_idx;
@@ -677,14 +701,17 @@ static void add_ioc(const char* value, const char* type, uint32_t meta_idx) {
     {
         uint64_t h = thrt_hash(value);
         uint64_t key = ioc_key_str(h);
+        size_t len;
+        size_t offset;
+        uint32_t idx;
         if (!ioc_dedup_pre_add(key, meta_idx)) return;
         ensure_capacity();
-        size_t len = strlen(value);
-        size_t offset = str_pool.len;
+        len = strlen(value);
+        offset = str_pool.len;
         memcpy(str_pool.data + offset, value, len + 1);
         str_pool.len += len + 1;
 
-        uint32_t idx = (uint32_t)str_db.count;
+        idx = (uint32_t)str_db.count;
         str_db.items[str_db.count++] = (builder_string_t){ h, (uint32_t)offset, meta_idx };
         ioc_dedup_commit(key, IOC_KIND_STR, idx);
 
@@ -699,6 +726,11 @@ static void add_ioc(const char* value, const char* type, uint32_t meta_idx) {
  * EMIT NORMALIZED IOC (V4)
  * ============================================================================ */
 static void emit_normalized_ioc_v4(normalized_ioc_v4_t *ioc) {
+    uint8_t type_mask;
+    uint8_t feed_idx;
+    uint64_t feed_mask;
+    uint8_t tlp;
+    uint32_t meta_idx;
     if (!ioc || strlen(ioc->value) == 0) return;
 
     if (ioc->action == '-') {
@@ -711,14 +743,14 @@ static void emit_normalized_ioc_v4(normalized_ioc_v4_t *ioc) {
         return;
     }
 
-    uint8_t type_mask = layer_to_type_mask(g_current_layer);
-    uint8_t feed_idx = get_feed_idx(ioc->feed);
-    uint64_t feed_mask = (1ULL << feed_idx);
+    type_mask = layer_to_type_mask(g_current_layer);
+    feed_idx = get_feed_idx(ioc->feed);
+    feed_mask = (1ULL << feed_idx);
 
     /* For tags layer, TLP is not applicable */
-    uint8_t tlp = (g_current_layer == LAYER_TAGS) ? 0 : ioc->tlp_mask;
+    tlp = (g_current_layer == LAYER_TAGS) ? 0 : ioc->tlp_mask;
 
-    uint32_t meta_idx = add_meta_v4(
+    meta_idx = add_meta_v4(
         ioc->confidence,
         type_mask,
         tlp,
@@ -736,36 +768,44 @@ static void emit_normalized_ioc_v4(normalized_ioc_v4_t *ioc) {
 /* ============================================================================
  * JSON HELPERS
  * ============================================================================ */
-char* json_get_val(char* json, const char* key, char* out_buf, size_t max_len) {
-    char search[64]; snprintf(search, sizeof(search), "\"%s\"", key);
-    char *p = strstr(json, search);
+static char* json_get_val(char* json, const char* key, char* out_buf, size_t max_len) {
+    char search[64];
+    char *p;
+    snprintf(search, sizeof(search), "\"%s\"", key);
+    p = strstr(json, search);
     if (!p) return NULL;
     p = strchr(p, ':'); if (!p) return NULL;
     p++; while(*p && isspace(*p)) p++;
 
     if (*p == '"') {
-        p++; char *end = strchr(p, '"'); if (!end) return NULL;
-        size_t len = end - p; if (len >= max_len) len = max_len - 1;
+        char *end;
+        size_t len;
+        p++; end = strchr(p, '"'); if (!end) return NULL;
+        len = end - p; if (len >= max_len) len = max_len - 1;
         strncpy(out_buf, p, len); out_buf[len] = 0;
         return out_buf;
     } else if (*p == '[') {
         p++; while(*p && isspace(*p)) p++;
         if (*p == '"') {
-            p++; char *end = strchr(p, '"'); if (!end) return NULL;
-            size_t len = end - p; if (len >= max_len) len = max_len - 1;
+            char *end;
+            size_t len;
+            p++; end = strchr(p, '"'); if (!end) return NULL;
+            len = end - p; if (len >= max_len) len = max_len - 1;
             strncpy(out_buf, p, len); out_buf[len] = 0;
             return out_buf;
         }
     } else {
-        char *end = p; while(isdigit(*end) || *end == '-') end++;
-        size_t len = end - p; if (len >= max_len) len = max_len - 1;
+        char *end = p;
+        size_t len;
+        while(isdigit(*end) || *end == '-') end++;
+        len = end - p; if (len >= max_len) len = max_len - 1;
         strncpy(out_buf, p, len); out_buf[len] = 0;
         return out_buf;
     }
     return NULL;
 }
 
-void unescape_json(char *str) {
+static void unescape_json(char *str) {
     char *r = str, *w = str;
     while (*r) { if (*r == '\\' && *(r+1) == '"') r++; *w++ = *r++; }
     *w = 0;
@@ -826,19 +866,21 @@ static const char *skip_json_val(const char *p, const char *end) {
  * p must point to opening '"'. Returns pointer past closing '"'. */
 static const char *extract_json_str(const char *p, const char *end,
                                      char *buf, size_t bufsz) {
+    size_t i;
     buf[0] = '\0';
     if (p >= end || *p != '"') return p;
     p++; /* skip opening quote */
-    size_t i = 0;
+    i = 0;
     while (p < end && *p != '"') {
         if (*p == '\\' && p + 1 < end) {
+            char c;
             p++; /* skip backslash */
-            char c = *p;
+            c = *p;
             switch (c) {
                 case 'n': c = '\n'; break;
                 case 't': c = '\t'; break;
                 case 'r': c = '\r'; break;
-                /* \", \\, \/ pass through as-is */
+                default: break; /* \", \\, \/ pass through as-is */
             }
             if (i < bufsz - 1) buf[i++] = c;
             p++;
@@ -854,8 +896,8 @@ static const char *extract_json_str(const char *p, const char *end,
 
 /* Extract an integer value. Returns pointer past the number. */
 static const char *extract_json_int(const char *p, const char *end, int *out) {
-    p = skip_ws(p, end);
     int neg = 0, val = 0;
+    p = skip_ws(p, end);
     if (p < end && *p == '-') { neg = 1; p++; }
     while (p < end && *p >= '0' && *p <= '9') {
         val = val * 10 + (*p - '0');
@@ -897,34 +939,40 @@ static const char *extract_json_bool(const char *p, const char *end, int *out) {
  * CSV: value,tag1,tag2,tag3,...
  * JSON: {"index":"value","tags":["tag1","tag2"]}
  * ============================================================================ */
-void process_tags_csv(const char* filename) {
+static void process_tags_csv(const char* filename) {
     FILE *f = fopen(filename, "r");
+    char line[MAX_LINE_LEN];
+    size_t count;
     if (!f) { fprintf(stderr, "Error opening %s: %s\n", filename, strerror(errno)); exit(1); }
 
     if (g_verbose) printf("%s %sProcessing %-14s: %s%s\n",
                           ICON_INFO, COL_BOLD, "Tags CSV", filename, COL_RESET);
 
-    char line[MAX_LINE_LEN];
-    size_t count = 0;
+    count = 0;
 
     while (fgets(line, sizeof(line), f)) {
+        char *value;
+        char tags_json[MAX_TAGS_JSON] = "[";
+        char *tag;
+        int first;
+        int tags_truncated;
+        normalized_ioc_v4_t ioc = {0};
         line[strcspn(line, "\r\n")] = 0;
         if (line[0] == 0 || line[0] == '#') continue;
 
         /* Parse: value,tag1,tag2,tag3,... */
-        char *value = strtok(line, ",");
+        value = strtok(line, ",");
         if (!value) continue;
         value = trim(value);
 
         /* Build JSON array from remaining tokens */
-        char tags_json[MAX_TAGS_JSON] = "[";
-        char *tag;
-        int first = 1;
-        int tags_truncated = 0;
+        first = 1;
+        tags_truncated = 0;
 
         while ((tag = strtok(NULL, ",")) != NULL) {
+            size_t tag_len;
             tag = trim(tag);
-            size_t tag_len = strlen(tag);
+            tag_len = strlen(tag);
             if (tag_len == 0) continue;
 
             /* Room needed: optional ',' + '"' + tag + '"' + closing ']' + NUL.
@@ -948,7 +996,6 @@ void process_tags_csv(const char* filename) {
 
         if (first) continue; /* No tags found */
 
-        normalized_ioc_v4_t ioc = {0};
         ioc.action = '+';
         snprintf(ioc.value, sizeof(ioc.value), "%s", value);
         snprintf(ioc.type, sizeof(ioc.type), "%s", "auto");
@@ -967,38 +1014,42 @@ void process_tags_csv(const char* filename) {
 }
 
 /* Process JSON tags file: {"index":"ip/hostname","tags":["tag1","tag2"]} per line */
-void process_tags_json(const char* filename) {
+static void process_tags_json(const char* filename) {
     FILE *f = fopen(filename, "r");
+    char line[MAX_LINE_LEN];
+    size_t count;
     if (!f) { fprintf(stderr, "Error opening %s: %s\n", filename, strerror(errno)); exit(1); }
 
     if (g_verbose) printf("%s %sProcessing %-14s: %s%s\n",
                           ICON_INFO, COL_BOLD, "Tags JSON", filename, COL_RESET);
 
-    char line[MAX_LINE_LEN];
-    size_t count = 0;
+    count = 0;
 
     while (fgets(line, sizeof(line), f)) {
+        char value[512] = {0};
+        char *tags_start;
+        char *tags_end;
+        char tags_json[MAX_TAGS_JSON] = {0};
+        size_t len;
+        normalized_ioc_v4_t ioc = {0};
         line[strcspn(line, "\r\n")] = 0;
         if (line[0] == 0 || line[0] != '{') continue;
 
-        char value[512] = {0};
         if (!json_get_val(line, "index", value, sizeof(value))) continue;
 
         /* Extract tags array as-is */
-        char *tags_start = strstr(line, "\"tags\"");
+        tags_start = strstr(line, "\"tags\"");
         if (!tags_start) continue;
         tags_start = strchr(tags_start, '[');
         if (!tags_start) continue;
 
-        char *tags_end = strchr(tags_start, ']');
+        tags_end = strchr(tags_start, ']');
         if (!tags_end) continue;
 
-        char tags_json[MAX_TAGS_JSON] = {0};
-        size_t len = tags_end - tags_start + 1;
+        len = tags_end - tags_start + 1;
         if (len >= sizeof(tags_json)) len = sizeof(tags_json) - 1;
         strncpy(tags_json, tags_start, len);
 
-        normalized_ioc_v4_t ioc = {0};
         ioc.action = '+';
         snprintf(ioc.value, sizeof(ioc.value), "%s", value);
         snprintf(ioc.type, sizeof(ioc.type), "%s", "auto");
@@ -1020,21 +1071,27 @@ void process_tags_json(const char* filename) {
  * PROCESS CTI CSV
  * Format: type,value,confidence,category,feed,tlp
  * ============================================================================ */
-void process_csv(const char *filename) {
+static void process_csv(const char *filename) {
     FILE *f = fopen(filename, "r");
+    char line[MAX_LINE_LEN];
     if (!f) { fprintf(stderr, "Error opening %s: %s\n", filename, strerror(errno)); exit(1); }
 
-    char line[MAX_LINE_LEN];
     if (g_verbose) printf("%s %sProcessing %-14s: %s%s\n",
                           ICON_INFO, COL_BOLD, "CSV", filename, COL_RESET);
 
     while (fgets(line, sizeof(line), f)) {
+        char *tokens[7] = {0};
+        char *p;
+        int i;
+        int col_offset;
+        char action;
+        int ncols;
+        normalized_ioc_v4_t ioc = {0};
         line[strcspn(line, "\r\n")] = 0;
         if (line[0] == 0 || line[0] == '#') continue;
 
-        char *tokens[7] = {0};
-        char *p = strtok(line, ",");
-        int i = 0;
+        p = strtok(line, ",");
+        i = 0;
         while (p && i < 7) { tokens[i++] = trim(p); p = strtok(NULL, ","); }
 
         if (i < 2) { stats.skipped_count++; continue; }
@@ -1048,18 +1105,17 @@ void process_csv(const char *filename) {
          *
          * If tokens[0] is "+" or "-", shift the field indices by 1.
          */
-        int col_offset = 0;
-        char action = '+';
+        col_offset = 0;
+        action = '+';
         if (tokens[0][0] == '+' && tokens[0][1] == '\0') {
             action = '+'; col_offset = 1;
         } else if (tokens[0][0] == '-' && tokens[0][1] == '\0') {
             action = '-'; col_offset = 1;
         }
 
-        int ncols = i - col_offset;
+        ncols = i - col_offset;
         if (ncols < 2) { stats.skipped_count++; continue; }
 
-        normalized_ioc_v4_t ioc = {0};
         ioc.action = action;
         snprintf(ioc.type, sizeof(ioc.type), "%s", tokens[col_offset + 0]);
         snprintf(ioc.value, sizeof(ioc.value), "%s", tokens[col_offset + 1]);
@@ -1076,14 +1132,18 @@ void process_csv(const char *filename) {
 /* ============================================================================
  * PROCESS RSYSLOG LOOKUP JSON
  * ============================================================================ */
-void process_rsyslog_json(const char* filename) {
+static void process_rsyslog_json(const char* filename) {
     FILE *f = fopen(filename, "r");
+    long fsize;
+    char *content;
+    size_t nread;
+    char *cursor;
     if (!f) { fprintf(stderr, "Error opening %s\n", filename); exit(1); }
 
-    fseek(f, 0, SEEK_END); long fsize = ftell(f); rewind(f);
+    fseek(f, 0, SEEK_END); fsize = ftell(f); rewind(f);
     if (fsize < 0) { fprintf(stderr, "Error: cannot determine size of %s\n", filename); fclose(f); exit(1); }
-    char *content = xmalloc((size_t)fsize + 1);
-    size_t nread = fread(content, 1, (size_t)fsize, f);
+    content = xmalloc((size_t)fsize + 1);
+    nread = fread(content, 1, (size_t)fsize, f);
     content[nread] = 0;
     fclose(f);
 
@@ -1091,35 +1151,41 @@ void process_rsyslog_json(const char* filename) {
                           ICON_INFO, COL_BOLD, "Lookup (JSON)", filename,
                           fsize/(1024.0*1024.0), COL_RESET);
 
-    char *cursor = content;
+    cursor = content;
 
     while ((cursor = strstr(cursor, "\"index\":"))) {
-        char *idx_start = strchr(cursor, ':'); if (!idx_start) break;
+        char *idx_start = strchr(cursor, ':');
+        char *idx_end;
+        char *ioc_val;
+        char *val_marker;
+        char *val_start;
+        char *val_end;
+        char tlp_str[32] = "clear";
+        char feed_str[256] = "Unknown";
+        char score_str[16] = "50";
+        char type_str[32] = "unknown";
+        normalized_ioc_v4_t ioc = {0};
+        if (!idx_start) break;
         idx_start = strchr(idx_start, '"'); if (!idx_start) break; idx_start++;
-        char *idx_end = strchr(idx_start, '"'); if (!idx_end) break;
-        *idx_end = 0; char *ioc_val = idx_start;
+        idx_end = strchr(idx_start, '"'); if (!idx_end) break;
+        *idx_end = 0; ioc_val = idx_start;
 
-        char *val_marker = strstr(idx_end + 1, "\"value\":"); if (!val_marker) break;
-        char *val_start = strchr(val_marker, ':'); if (!val_start) break;
+        val_marker = strstr(idx_end + 1, "\"value\":"); if (!val_marker) break;
+        val_start = strchr(val_marker, ':'); if (!val_start) break;
         val_start = strchr(val_start, '"'); if (!val_start) break; val_start++;
 
-        char *val_end = val_start;
+        val_end = val_start;
         while (*val_end) { if (*val_end == '"' && *(val_end-1) != '\\') break; val_end++; }
         *val_end = 0;
 
         unescape_json(val_start);
 
-        char tlp_str[32] = "clear";
-        char feed_str[256] = "Unknown";
-        char score_str[16] = "50";
-        char type_str[32] = "unknown";
 
         json_get_val(val_start, "tlp", tlp_str, sizeof(tlp_str));
         json_get_val(val_start, "max_score", score_str, sizeof(score_str));
         json_get_val(val_start, "type", type_str, sizeof(type_str));
         json_get_val(val_start, "feed", feed_str, sizeof(feed_str));
 
-        normalized_ioc_v4_t ioc = {0};
         ioc.action = '+';
         snprintf(ioc.value, sizeof(ioc.value), "%s", ioc_val);
         snprintf(ioc.type, sizeof(ioc.type), "%s", type_str);
@@ -1137,22 +1203,26 @@ void process_rsyslog_json(const char* filename) {
 /* ============================================================================
  * PROCESS PLAIN TEXT IOC LIST
  * ============================================================================ */
-void process_plaintext(const char* filename) {
+static void process_plaintext(const char* filename) {
     FILE *f = fopen(filename, "r");
+    char line[MAX_LINE_LEN];
+    size_t count;
     if (!f) { fprintf(stderr, "Error opening %s: %s\n", filename, strerror(errno)); exit(1); }
 
     if (g_verbose) printf("%s %sProcessing %-14s: %s%s\n",
                           ICON_INFO, COL_BOLD, "Plain Text", filename, COL_RESET);
 
-    char line[MAX_LINE_LEN];
-    size_t count = 0;
+    count = 0;
 
     while (fgets(line, sizeof(line), f)) {
+        char *val;
+        normalized_ioc_v4_t ioc = {0};
+        struct in_addr a4;
+        struct in6_addr a6;
         line[strcspn(line, "\r\n")] = 0;
-        char *val = trim(line);
+        val = trim(line);
         if (val[0] == 0 || val[0] == '#' || val[0] == ';') continue;
 
-        normalized_ioc_v4_t ioc = {0};
         ioc.action = '+';
         snprintf(ioc.value, sizeof(ioc.value), "%s", val);
         ioc.confidence = 50;
@@ -1161,8 +1231,6 @@ void process_plaintext(const char* filename) {
         snprintf(ioc.feed, sizeof(ioc.feed), "%s", g_default_source);
 
         /* Auto-detect type */
-        struct in_addr a4;
-        struct in6_addr a6;
         if (inet_pton(AF_INET, val, &a4) == 1 || inet_pton(AF_INET6, val, &a6) == 1) {
             snprintf(ioc.type, sizeof(ioc.type), "%s", "ip");
         } else if (strchr(val, '@')) {
@@ -1200,6 +1268,7 @@ void process_plaintext(const char* filename) {
 /* Append a label string to the merged tags_json buffer with dedup */
 static void append_label(char *buf, int *pos, int maxlen, const char *label) {
     size_t label_len = strlen(label);
+    int need;
     if (label_len == 0) return;
 
     /* Quick linear dedup: check if this label is already in the buffer.
@@ -1213,7 +1282,7 @@ static void append_label(char *buf, int *pos, int maxlen, const char *label) {
     }
 
     /* Format: ,"label" (or "label" if first) */
-    int need = (*pos > 1 ? 1 : 0) + 1 + (int)label_len + 1; /* comma + quote + label + quote */
+    need = (*pos > 1 ? 1 : 0) + 1 + (int)label_len + 1; /* comma + quote + label + quote */
     if (*pos + need + 2 > maxlen) return; /* +2 for closing ] and \0 */
 
     if (*pos > 1) buf[(*pos)++] = ',';
@@ -1270,13 +1339,13 @@ static const char *parse_cti_feed_objects(const char *p, const char *end,
 
         /* Walk fields of this feed_object */
         while (p < end) {
+            char key[32];
             p = skip_ws(p, end);
             if (p >= end || *p == '}') break;
             if (*p == ',') { p++; continue; }
 
             if (*p != '"') break;
 
-            char key[32];
             p = extract_json_str(p, end, key, sizeof(key));
             p = skip_ws(p, end);
             if (p >= end || *p != ':') break;
@@ -1315,26 +1384,35 @@ static const char *parse_cti_feed_objects(const char *p, const char *end,
  * p points to '{'. Returns pointer past '}'. */
 static const char *parse_cti_entry(const char *p, const char *end,
                                     const char *ioc_value) {
+    char tlp_str[64] = "";
+    char type_str[64] = "";
+    int max_score;
+    uint64_t feed_mask;
+    char labels_json[MAX_TAGS_JSON];
+    int labels_pos;
+    uint8_t confidence;
+    uint8_t type_mask;
+    uint8_t tlp_mask;
+    uint16_t category_mask;
+    const char *tags;
+    uint32_t meta_idx;
     if (p >= end || *p != '{') return skip_json_val(p, end);
     p++; /* skip '{' */
 
-    char tlp_str[64] = "";
-    char type_str[64] = "";
-    int max_score = 0;
-    uint64_t feed_mask = 0;
-    char labels_json[MAX_TAGS_JSON];
-    int labels_pos = 1;
+    max_score = 0;
+    feed_mask = 0;
+    labels_pos = 1;
 
     labels_json[0] = '[';
     labels_json[1] = '\0';
 
     while (p < end) {
+        char key[32];
         p = skip_ws(p, end);
         if (p >= end || *p == '}') break;
         if (*p == ',') { p++; continue; }
         if (*p != '"') break;
 
-        char key[32];
         p = extract_json_str(p, end, key, sizeof(key));
         p = skip_ws(p, end);
         if (p >= end || *p != ':') break;
@@ -1383,7 +1461,7 @@ static const char *parse_cti_entry(const char *p, const char *end,
     }
 
     /* Clamp confidence */
-    uint8_t confidence = (max_score > 100) ? 100 : (max_score < 0) ? 0 : (uint8_t)max_score;
+    confidence = (max_score > 100) ? 100 : (max_score < 0) ? 0 : (uint8_t)max_score;
 
     /* If no feeds were found, assign default */
     if (feed_mask == 0) {
@@ -1392,12 +1470,12 @@ static const char *parse_cti_entry(const char *p, const char *end,
     }
 
     /* Build metadata directly (bypasses normalized_ioc_v4_t for multi-feed) */
-    uint8_t type_mask = layer_to_type_mask(g_current_layer);
-    uint8_t tlp_mask = parse_tlp_mask(tlp_str);
-    uint16_t category_mask = parse_category_mask(type_str);
-    const char *tags = (labels_pos > 2) ? labels_json : NULL; /* >2 means we have at least one label */
+    type_mask = layer_to_type_mask(g_current_layer);
+    tlp_mask = parse_tlp_mask(tlp_str);
+    category_mask = parse_category_mask(type_str);
+    tags = (labels_pos > 2) ? labels_json : NULL; /* >2 means we have at least one label */
 
-    uint32_t meta_idx = add_meta_v4(confidence, type_mask, tlp_mask,
+    meta_idx = add_meta_v4(confidence, type_mask, tlp_mask,
                                      category_mask, feed_mask, tags);
     add_ioc(ioc_value, type_str, meta_idx);
     stats.added_count++;
@@ -1406,21 +1484,26 @@ static const char *parse_cti_entry(const char *p, const char *end,
 }
 
 /* Main CTI dictionary JSON processor */
-void process_cti_json(const char *filename) {
+static void process_cti_json(const char *filename) {
     int fd = open(filename, O_RDONLY);
+    struct stat sb;
+    const char *map;
+    const char *end;
+    const char *p;
+    size_t count;
+    size_t errors;
     if (fd < 0) {
         fprintf(stderr, "Error opening %s: %s\n", filename, strerror(errno));
         exit(1);
     }
 
-    struct stat sb;
     if (fstat(fd, &sb) < 0 || sb.st_size == 0) {
         fprintf(stderr, "%s Empty or unreadable file: %s\n", ICON_WARN, filename);
         close(fd);
         return;
     }
 
-    const char *map = (const char *)mmap(NULL, sb.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    map = (const char *)mmap(NULL, sb.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
     if (map == MAP_FAILED) {
         fprintf(stderr, "mmap failed for %s: %s\n", filename, strerror(errno));
         close(fd);
@@ -1431,8 +1514,8 @@ void process_cti_json(const char *filename) {
     madvise((void *)map, sb.st_size, MADV_SEQUENTIAL);
 #endif
 
-    const char *end = map + sb.st_size;
-    const char *p = map;
+    end = map + sb.st_size;
+    p = map;
 
     if (g_verbose) printf("%s %sProcessing %-14s: %s (%.2f MB)%s\n",
                            ICON_INFO, COL_BOLD, "CTI JSON", filename,
@@ -1448,10 +1531,11 @@ void process_cti_json(const char *filename) {
     }
     p++; /* skip '{' */
 
-    size_t count = 0;
-    size_t errors = 0;
+    count = 0;
+    errors = 0;
 
     while (p < end) {
+        char ioc_value[512];
         p = skip_ws(p, end);
         if (p >= end || *p == '}') break;
         if (*p == ',') { p++; continue; }
@@ -1464,7 +1548,6 @@ void process_cti_json(const char *filename) {
         }
 
         /* Extract the IOC value (top-level key) */
-        char ioc_value[512];
         p = extract_json_str(p, end, ioc_value, sizeof(ioc_value));
 
         /* Expect ':' */
@@ -1585,21 +1668,21 @@ static const char *parse_misp_tags(const char *p, const char *end,
     p++; /* skip '[' */
 
     while (p < end) {
+        char tag_name[256] = "";
         p = skip_ws(p, end);
         if (p >= end || *p == ']') break;
         if (*p == ',') { p++; continue; }
         if (*p != '{') { p = skip_json_val(p, end); continue; }
         p++; /* skip '{' */
 
-        char tag_name[256] = "";
 
         while (p < end) {
+            char key[32];
             p = skip_ws(p, end);
             if (p >= end || *p == '}') break;
             if (*p == ',') { p++; continue; }
             if (*p != '"') break;
 
-            char key[32];
             p = extract_json_str(p, end, key, sizeof(key));
             p = skip_ws(p, end);
             if (p >= end || *p != ':') break;
@@ -1639,19 +1722,23 @@ static int emit_misp_ioc(const char *misp_type, const char *value,
                           uint8_t tlp_mask, const char *tags_json,
                           char action) {
     const char *ioc_type = misp_type_to_ioc_type(misp_type);
+    char clean_value[512];
+    normalized_ioc_v4_t ioc = {0};
     if (!ioc_type) return 0;
 
     /* Composite: domain|ip -> emit both parts separately */
     if (strcmp(ioc_type, "domain|ip") == 0) {
         char vbuf[512];
+        char *pipe;
+        int count;
         snprintf(vbuf, sizeof(vbuf), "%s", value);
-        char *pipe = strchr(vbuf, '|');
-        int count = 0;
+        pipe = strchr(vbuf, '|');
+        count = 0;
 
         if (pipe) {
+            const char *ip_part;
             *pipe = '\0';
             /* Emit domain (left of pipe) */
-            normalized_ioc_v4_t ioc = {0};
             ioc.action = action;
             snprintf(ioc.value, sizeof(ioc.value), "%s", vbuf);
             snprintf(ioc.type, sizeof(ioc.type), "%s", "domain");
@@ -1664,7 +1751,7 @@ static int emit_misp_ioc(const char *misp_type, const char *value,
             count++;
 
             /* Emit IP (right of pipe) */
-            const char *ip_part = pipe + 1;
+            ip_part = pipe + 1;
             if (ip_part[0]) {
                 memset(&ioc, 0, sizeof(ioc));
                 ioc.action = action;
@@ -1683,7 +1770,6 @@ static int emit_misp_ioc(const char *misp_type, const char *value,
     }
 
     /* Handle pipe-separated composites: strip to the relevant part */
-    char clean_value[512];
     snprintf(clean_value, sizeof(clean_value), "%s", value);
 
     if (strchr(misp_type, '|')) {
@@ -1699,7 +1785,6 @@ static int emit_misp_ioc(const char *misp_type, const char *value,
         }
     }
 
-    normalized_ioc_v4_t ioc = {0};
     ioc.action = action;
     snprintf(ioc.value, sizeof(ioc.value), "%s", clean_value);
     snprintf(ioc.type, sizeof(ioc.type), "%s", ioc_type);
@@ -1721,29 +1806,38 @@ static const char *parse_misp_attribute(const char *p, const char *end,
                                          uint8_t event_tlp,
                                          const char *event_tags,
                                          size_t *emitted, size_t *skipped) {
-    if (p >= end || *p != '{') return skip_json_val(p, end);
-    p++; /* skip '{' */
-
     char misp_type[64] = "";
     char value[512] = "";
     char category[128] = "";
-    int to_ids = 1; /* default: import */
-    int deleted = 0;
-
-    /* Attribute-level TLP and tags */
+    int to_ids;
+    int deleted;
     char attr_tlp[64] = "";
     char attr_tags[MAX_TAGS_JSON];
-    int attr_tags_pos = 1;
+    int attr_tags_pos;
+    uint8_t tlp;
+    char merged_tags[MAX_TAGS_JSON];
+    int merged_pos;
+    uint16_t cat_mask;
+    const char *tags;
+    int n;
+    if (p >= end || *p != '{') return skip_json_val(p, end);
+    p++; /* skip '{' */
+
+    to_ids = 1; /* default: import */
+    deleted = 0;
+
+    /* Attribute-level TLP and tags */
+    attr_tags_pos = 1;
     attr_tags[0] = '[';
     attr_tags[1] = '\0';
 
     while (p < end) {
+        char key[32];
         p = skip_ws(p, end);
         if (p >= end || *p == '}') break;
         if (*p == ',') { p++; continue; }
         if (*p != '"') break;
 
-        char key[32];
         p = extract_json_str(p, end, key, sizeof(key));
         p = skip_ws(p, end);
         if (p >= end || *p != ':') break;
@@ -1809,11 +1903,10 @@ static const char *parse_misp_attribute(const char *p, const char *end,
     }
 
     /* Resolve TLP: attribute-level overrides event-level */
-    uint8_t tlp = attr_tlp[0] ? parse_tlp_mask(attr_tlp) : event_tlp;
+    tlp = attr_tlp[0] ? parse_tlp_mask(attr_tlp) : event_tlp;
 
     /* Merge tags: event tags + attribute tags */
-    char merged_tags[MAX_TAGS_JSON];
-    int merged_pos = 1;
+    merged_pos = 1;
     merged_tags[0] = '[';
     merged_tags[1] = '\0';
 
@@ -1842,10 +1935,10 @@ static const char *parse_misp_attribute(const char *p, const char *end,
     merged_tags[merged_pos++] = ']';
     merged_tags[merged_pos] = '\0';
 
-    uint16_t cat_mask = misp_category_to_mask(category);
-    const char *tags = (merged_pos > 2) ? merged_tags : NULL;
+    cat_mask = misp_category_to_mask(category);
+    tags = (merged_pos > 2) ? merged_tags : NULL;
 
-    int n = emit_misp_ioc(misp_type, value, event_confidence, cat_mask, tlp, tags, '+');
+    n = emit_misp_ioc(misp_type, value, event_confidence, cat_mask, tlp, tags, '+');
     *emitted += n;
 
     return p;
@@ -1857,31 +1950,38 @@ static const char *parse_misp_attribute(const char *p, const char *end,
  * of Attribute/Object arrays, second pass emits IOCs. */
 static const char *parse_misp_event(const char *p, const char *end,
                                      size_t *emitted, size_t *skipped) {
+    char event_info[256] = "";
+    int threat_level;
+    char event_tlp[64] = "";
+    char event_tags[MAX_TAGS_JSON];
+    int event_tags_pos;
+    const char *attr_start;
+    const char *obj_start;
+    uint8_t ev_tlp;
+    uint8_t ev_confidence;
+    const char *ev_tags;
     if (p >= end || *p != '{') return skip_json_val(p, end);
     p++; /* skip '{' */
 
-    char event_info[256] = "";
-    int threat_level = 0;
+    threat_level = 0;
 
     /* Event-level TLP and tags */
-    char event_tlp[64] = "";
-    char event_tags[MAX_TAGS_JSON];
-    int event_tags_pos = 1;
+    event_tags_pos = 1;
     event_tags[0] = '[';
     event_tags[1] = '\0';
 
     /* Save positions for second-pass parsing (data stays in mmap) */
-    const char *attr_start = NULL;
-    const char *obj_start = NULL;
+    attr_start = NULL;
+    obj_start = NULL;
 
     /* First pass: collect event metadata, save array positions */
     while (p < end) {
+        char key[32];
         p = skip_ws(p, end);
         if (p >= end || *p == '}') break;
         if (*p == ',') { p++; continue; }
         if (*p != '"') break;
 
-        char key[32];
         p = extract_json_str(p, end, key, sizeof(key));
         p = skip_ws(p, end);
         if (p >= end || *p != ':') break;
@@ -1927,9 +2027,9 @@ static const char *parse_misp_event(const char *p, const char *end,
         event_tags[event_tags_pos] = '\0';
     }
 
-    uint8_t ev_tlp = parse_tlp_mask(event_tlp);
-    uint8_t ev_confidence = misp_threat_level_to_confidence(threat_level);
-    const char *ev_tags = (event_tags_pos > 2) ? event_tags : NULL;
+    ev_tlp = parse_tlp_mask(event_tlp);
+    ev_confidence = misp_threat_level_to_confidence(threat_level);
+    ev_tags = (event_tags_pos > 2) ? event_tags : NULL;
 
     if (g_verbose && event_info[0]) {
         printf("   %s Event: %s (threat_level=%d, tlp=%s)\n",
@@ -1953,21 +2053,22 @@ static const char *parse_misp_event(const char *p, const char *end,
     if (obj_start && obj_start < end && *obj_start == '[') {
         const char *op = obj_start + 1; /* skip '[' */
         while (op < end) {
+            const char *nested_attr;
             op = skip_ws(op, end);
             if (op >= end || *op == ']') break;
             if (*op == ',') { op++; continue; }
             if (*op != '{') { op = skip_json_val(op, end); continue; }
 
             /* Walk Object fields looking for nested Attribute array */
-            const char *nested_attr = NULL;
+            nested_attr = NULL;
             op++; /* skip '{' */
             while (op < end) {
+                char okey[32];
                 op = skip_ws(op, end);
                 if (op >= end || *op == '}') break;
                 if (*op == ',') { op++; continue; }
                 if (*op != '"') break;
 
-                char okey[32];
                 op = extract_json_str(op, end, okey, sizeof(okey));
                 op = skip_ws(op, end);
                 if (op >= end || *op != ':') break;
@@ -2147,21 +2248,26 @@ static const char *misp_parse_response_object(const char *p, const char *end,
 
 /* Main MISP JSON processor.
  * Event export, event search, and attribute search. */
-void process_misp_json(const char *filename) {
+static void process_misp_json(const char *filename) {
     int fd = open(filename, O_RDONLY);
+    struct stat sb;
+    const char *map;
+    const char *end;
+    const char *p;
+    char first_key[32];
+    size_t emitted = 0, skipped = 0;
     if (fd < 0) {
         fprintf(stderr, "Error opening %s: %s\n", filename, strerror(errno));
         exit(1);
     }
 
-    struct stat sb;
     if (fstat(fd, &sb) < 0 || sb.st_size == 0) {
         fprintf(stderr, "%s Empty or unreadable file: %s\n", ICON_WARN, filename);
         close(fd);
         return;
     }
 
-    const char *map = (const char *)mmap(NULL, sb.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    map = (const char *)mmap(NULL, sb.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
     if (map == MAP_FAILED) {
         fprintf(stderr, "mmap failed for %s: %s\n", filename, strerror(errno));
         close(fd);
@@ -2172,14 +2278,12 @@ void process_misp_json(const char *filename) {
     madvise((void *)map, sb.st_size, MADV_SEQUENTIAL);
 #endif
 
-    const char *end = map + sb.st_size;
-    const char *p = map;
+    end = map + sb.st_size;
+    p = map;
 
     if (g_verbose) printf("%s %sProcessing %-14s: %s (%.2f MB)%s\n",
                            ICON_INFO, COL_BOLD, "MISP JSON", filename,
                            sb.st_size / (1024.0 * 1024.0), COL_RESET);
-
-    size_t emitted = 0, skipped = 0;
 
     /* Detect format: {"Event":{...}} or {"response":[...]} */
     p = skip_ws(p, end);
@@ -2192,7 +2296,6 @@ void process_misp_json(const char *filename) {
     p = skip_ws(p, end);
     if (p >= end || *p != '"') goto done;
 
-    char first_key[32];
     p = extract_json_str(p, end, first_key, sizeof(first_key));
     p = skip_ws(p, end);
     if (p >= end || *p != ':') goto done;
@@ -2278,19 +2381,19 @@ done:
 /* ============================================================================
  * BUILDER UTILITIES
  * ============================================================================ */
-int cmp_ip(const void *a, const void *b) {
+static int cmp_ip(const void *a, const void *b) {
     builder_ip_t *ipA = (builder_ip_t*)a;
     builder_ip_t *ipB = (builder_ip_t*)b;
     return (ipA->start > ipB->start) - (ipA->start < ipB->start);
 }
 
-int cmp_ipv6(const void *a, const void *b) {
+static int cmp_ipv6(const void *a, const void *b) {
     builder_ipv6_t *ipA = (builder_ipv6_t*)a;
     builder_ipv6_t *ipB = (builder_ipv6_t*)b;
     return memcmp(ipA->start, ipB->start, 16);
 }
 
-void build_ip_accel(void) {
+static void build_ip_accel(void) {
     memset(ip_accel_db, 0, sizeof(ip_accel_db));
     for (size_t i = 0; i < ip_db.count; i++) {
         uint32_t idx_start = ip_db.items[i].start >> (32 - THRT_IP_ACCEL_BITS);
@@ -2302,7 +2405,7 @@ void build_ip_accel(void) {
     }
 }
 
-void build_bloom(void) {
+static void build_bloom(void) {
     bloom_filter = xcalloc(1, bloom_size_bits / 8);
     for (size_t i = 0; i < str_db.count; i++) {
         uint64_t h = str_db.items[i].hash;
@@ -2344,15 +2447,17 @@ static uint32_t compute_file_checksum(FILE *f, size_t checksum_field_offset) {
 /* ============================================================================
  * PROCESS FILE (with layer detection)
  * ============================================================================ */
-void process_file(const char* filename) {
+static void process_file(const char* filename) {
     /* Set default source to filename (basename) */
     const char* basename = strrchr(filename, '/');
+    char *dot;
+    const char* ext;
     basename = basename ? basename + 1 : filename;
     snprintf(g_default_source, sizeof(g_default_source), "%s", basename);
-    char *dot = strrchr(g_default_source, '.');
+    dot = strrchr(g_default_source, '.');
     if (dot) *dot = 0;
 
-    const char* ext = strrchr(filename, '.');
+    ext = strrchr(filename, '.');
     /* sample.stix.json keeps one suffix after the first cut. Drop it so the
      * feed name is the stem the operator typed. */
     if (strcasestr(filename, ".stix.json") != NULL ||
@@ -2405,30 +2510,38 @@ void process_file(const char* filename) {
  * ============================================================================ */
 static void load_existing_thrt(const char *filename) {
     int fd = open(filename, O_RDONLY);
+    struct stat sb;
+    void *map;
+    thrt_header_t *hdr;
+    char *base;
+    thrt_metadata_t *meta;
+    thrt_ipv4_range_t *ipv4;
+    thrt_ipv6_range_t *ipv6;
+    thrt_hash_entry_t *ht;
+    char *str_base;
     if (fd < 0) {
         fprintf(stderr, "%s Cannot open existing DB %s: %s\n", ICON_WARN, filename, strerror(errno));
         fprintf(stderr, "  Incremental mode requires an existing database. Build a full one first.\n");
         exit(1);
     }
 
-    struct stat sb;
     fstat(fd, &sb);
-    void *map = mmap(NULL, sb.st_size, PROT_READ, MAP_SHARED, fd, 0);
+    map = mmap(NULL, sb.st_size, PROT_READ, MAP_SHARED, fd, 0);
     if (map == MAP_FAILED) { perror("mmap"); close(fd); exit(1); }
 
-    thrt_header_t *hdr = (thrt_header_t*)map;
+    hdr = (thrt_header_t*)map;
     if (hdr->magic != THRT_MAGIC || hdr->version < THRT_VERSION) {
         fprintf(stderr, "%s Existing DB is v%d - v%d required. Build a fresh V4 first.\n",
                 ICON_WARN, hdr->version, THRT_VERSION);
         munmap(map, sb.st_size); close(fd); exit(1);
     }
 
-    char *base = (char*)map;
-    thrt_metadata_t *meta = (thrt_metadata_t*)(base + hdr->offset_metadata);
-    thrt_ipv4_range_t *ipv4 = (thrt_ipv4_range_t*)(base + hdr->offset_ipv4);
-    thrt_ipv6_range_t *ipv6 = (thrt_ipv6_range_t*)(base + hdr->offset_ipv6);
-    thrt_hash_entry_t *ht = (thrt_hash_entry_t*)(base + hdr->offset_hashtable);
-    char *str_base = base + hdr->offset_strings;
+    base = (char*)map;
+    meta = (thrt_metadata_t*)(base + hdr->offset_metadata);
+    ipv4 = (thrt_ipv4_range_t*)(base + hdr->offset_ipv4);
+    ipv6 = (thrt_ipv6_range_t*)(base + hdr->offset_ipv6);
+    ht = (thrt_hash_entry_t*)(base + hdr->offset_hashtable);
+    str_base = base + hdr->offset_strings;
 
     /* Import feed names (preserve exact ordering for bitmask compat) */
     if (hdr->feed_count > 0 && hdr->offset_feeds > 0) {
@@ -2453,8 +2566,9 @@ static void load_existing_thrt(const char *filename) {
 
         /* Re-import tags into our string pool */
         if (meta[i].tags_offset > 0 && meta[i].tags_length > 0) {
+            uint32_t new_offset;
             ensure_capacity();
-            uint32_t new_offset = str_pool.len;
+            new_offset = str_pool.len;
             memcpy(str_pool.data + new_offset, str_base + meta[i].tags_offset, meta[i].tags_length);
             str_pool.len += meta[i].tags_length;
             /* Null-terminate */
@@ -2476,8 +2590,9 @@ static void load_existing_thrt(const char *filename) {
 
     /* Import IPv6 ranges */
     for (uint32_t i = 0; i < hdr->ipv6_range_count; i++) {
+        builder_ipv6_t *e;
         ensure_capacity();
-        builder_ipv6_t *e = &ip6_db.items[ip6_db.count++];
+        e = &ip6_db.items[ip6_db.count++];
         memcpy(e->start, ipv6[i].ip_start, 16);
         memcpy(e->end, ipv6[i].ip_end, 16);
         e->meta_idx = ipv6[i].meta_idx;
@@ -2485,13 +2600,16 @@ static void load_existing_thrt(const char *filename) {
 
     /* Import string entries (domains, hashes, emails) */
     for (uint32_t i = 0; i < hdr->hash_slots; i++) {
+        const char *str_val;
+        size_t len;
+        uint32_t new_offset;
         if (ht[i].meta_idx == 0xFFFFFFFF) continue; /* Empty slot */
 
-        const char *str_val = str_base + ht[i].string_offset;
-        size_t len = strlen(str_val);
+        str_val = str_base + ht[i].string_offset;
+        len = strlen(str_val);
 
         ensure_capacity();
-        uint32_t new_offset = str_pool.len;
+        new_offset = str_pool.len;
         memcpy(str_pool.data + new_offset, str_val, len + 1);
         str_pool.len += len + 1;
 
@@ -2516,14 +2634,22 @@ static void load_existing_thrt(const char *filename) {
 /* ============================================================================
  * WRITE THRT DATABASE (V4)
  * ============================================================================ */
-void write_thrt(const char *filename) {
+static void write_thrt(const char *filename) {
+    char tmp_filename[PATH_MAX + 32];
+    FILE *f;
+    uint32_t hash_slots;
+    thrt_hash_entry_t *ht;
+    thrt_header_t hdr = {0};
+    uint64_t offset;
+    uint32_t checksum;
     /* --- Incremental: filter out deleted entries before building --- */
     if (g_delete_set && g_delete_set->count > 0) {
         size_t orig;
+        size_t w;
 
         /* Filter IPv4 ranges: hash the string representation of each IP */
         orig = ip_db.count;
-        size_t w = 0;
+        w = 0;
         for (size_t i = 0; i < ip_db.count; i++) {
             char buf[INET_ADDRSTRLEN];
             uint32_t ip_net = htonl(ip_db.items[i].start);
@@ -2571,16 +2697,16 @@ void write_thrt(const char *filename) {
     build_bloom();
 
     /* Atomic file replacement */
-    char tmp_filename[PATH_MAX + 32];   /* room for ".tmp.<pid>" suffix */
+       /* room for ".tmp.<pid>" suffix */
     snprintf(tmp_filename, sizeof(tmp_filename), "%s.tmp.%d", filename, getpid());
 
-    FILE *f = fopen(tmp_filename, "w+b");
+    f = fopen(tmp_filename, "w+b");
     if (!f) { perror("fopen output"); exit(1); }
 
     /* Build hash table */
-    uint32_t hash_slots = 1024;
+    hash_slots = 1024;
     while (hash_slots < str_db.count * 2) hash_slots *= 2;
-    thrt_hash_entry_t *ht = xcalloc(hash_slots, sizeof(thrt_hash_entry_t));
+    ht = xcalloc(hash_slots, sizeof(thrt_hash_entry_t));
     memset(ht, 0xFF, hash_slots * sizeof(thrt_hash_entry_t));
 
     for (size_t i = 0; i < str_db.count; i++) {
@@ -2593,7 +2719,6 @@ void write_thrt(const char *filename) {
     }
 
     /* Calculate offsets */
-    thrt_header_t hdr = {0};
     hdr.magic = THRT_MAGIC;
     hdr.version = THRT_VERSION;
     hdr.metadata_count = meta_db.count;
@@ -2604,7 +2729,7 @@ void write_thrt(const char *filename) {
     hdr.feed_count = feed_db.count;
     hdr.checksum_offset = offsetof(thrt_header_t, checksum);
 
-    uint64_t offset = sizeof(thrt_header_t);
+    offset = sizeof(thrt_header_t);
     hdr.offset_metadata = offset;  offset += meta_db.count * sizeof(thrt_metadata_t);
     hdr.offset_ipv4 = offset;      offset += ip_db.count * sizeof(thrt_ipv4_range_t);
     hdr.offset_ipv6 = offset;      offset += ip6_db.count * sizeof(thrt_ipv6_range_t);
@@ -2670,7 +2795,7 @@ void write_thrt(const char *filename) {
 
     /* Compute and write checksum */
     fflush(f);
-    uint32_t checksum = compute_file_checksum(f, hdr.checksum_offset);
+    checksum = compute_file_checksum(f, hdr.checksum_offset);
     fseek(f, hdr.checksum_offset, SEEK_SET);
     fwrite(&checksum, sizeof(checksum), 1, f);
 
@@ -2792,11 +2917,12 @@ static void csv_autodetect_type(const char *val, char *out, size_t outsz) {
      * add_ioc uses, so the two cannot disagree: testing only the part before
      * the slash classified "103.117.72.60/ptj" (a scheme-less URL) as an IP. */
     parsed_ip_t ip;
+    size_t len;
     if (parse_ip_or_cidr(val, 1, &ip)) {
         snprintf(out, outsz, "%s", "ip");
         return;
     }
-    size_t len = strlen(val);
+    len = strlen(val);
     if ((len == 32 || len == 40 || len == 64 || len == 128) &&
         strspn(val, "0123456789abcdefABCDEF") == len) {
         snprintf(out, outsz, "%s", "hash");
@@ -2819,8 +2945,9 @@ static void csv_autodetect_type(const char *val, char *out, size_t outsz) {
 /* Try to interpret tokens as a header row. Returns 1 if it looks like a header
  * (at least an indicator-naming column matched), filling *cm; else 0. */
 static int csv_parse_header(char **tokens, int ntok, csv_colmap_t *cm) {
+    int matched;
     cm->ind = cm->type = cm->conf = cm->cat = cm->tlp = cm->feed = cm->action = -1;
-    int matched = 0;
+    matched = 0;
     for (int i = 0; i < ntok; i++) {
         const char *t = tokens[i];
         if (!t) continue;
@@ -2846,8 +2973,13 @@ static int csv_parse_header(char **tokens, int ntok, csv_colmap_t *cm) {
     return matched;
 }
 
-void parse_csv_file(const char *filename) {
+static void parse_csv_file(const char *filename) {
     FILE *f = fopen(filename, "r");
+    char line[MAX_LINE_LEN];
+    int have_header;
+    int header_checked;
+    csv_colmap_t cm = { .ind = -1, .type = -1, .conf = -1, .cat = -1,
+                        .tlp = -1, .feed = -1, .action = -1 };
     if (!f) {
         fprintf(stderr, "%s Error opening %s: %s\n", ICON_WARN, filename, strerror(errno));
         return;
@@ -2857,35 +2989,36 @@ void parse_csv_file(const char *filename) {
      * from --feed-key, but be self-sufficient if called directly). */
     if (strcmp(g_default_source, "Unknown") == 0) {
         const char *bn = strrchr(filename, '/');
+        char *dot;
         bn = bn ? bn + 1 : filename;
         snprintf(g_default_source, sizeof(g_default_source), "%s", bn);
-        char *dot = strrchr(g_default_source, '.');
+        dot = strrchr(g_default_source, '.');
         if (dot) *dot = 0;
     }
 
     if (g_verbose) printf("%s %sProcessing %-14s: %s%s\n",
                           ICON_INFO, COL_BOLD, "CSV (delta)", filename, COL_RESET);
 
-    char line[MAX_LINE_LEN];
-    csv_colmap_t cm = { .ind = -1, .type = -1, .conf = -1, .cat = -1,
-                        .tlp = -1, .feed = -1, .action = -1 };
-    int have_header = 0;
-    int header_checked = 0;
+    have_header = 0;
+    header_checked = 0;
 
     while (fgets(line, sizeof(line), f)) {
+        char *tokens[16] = {0};
+        char *p;
+        int n;
+        normalized_ioc_v4_t ioc = {0};
         line[strcspn(line, "\r\n")] = 0;
         if (line[0] == 0 || line[0] == '#') continue;
 
-        char *tokens[16] = {0};
-        char *p = strtok(line, ",");
-        int n = 0;
+        p = strtok(line, ",");
+        n = 0;
         while (p && n < 16) { tokens[n++] = trim(p); p = strtok(NULL, ","); }
         if (n == 0) continue;
 
         /* First data row: decide header vs. data. */
         if (!header_checked) {
-            header_checked = 1;
             csv_colmap_t probe;
+            header_checked = 1;
             if (csv_parse_header(tokens, n, &probe)) {
                 cm = probe;
                 have_header = 1;
@@ -2895,7 +3028,6 @@ void parse_csv_file(const char *filename) {
             have_header = 0;
         }
 
-        normalized_ioc_v4_t ioc = {0};
         ioc.action = '+';
 
         if (have_header) {
@@ -2966,8 +3098,9 @@ static void compact_str_pool(void) {
     /* Live meta tags */
     for (size_t i = 0; i < meta_db.count; i++) {
         builder_meta_v4_t *m = &meta_db.items[i];
+        uint32_t off;
         if (m->tags_length == 0) { m->tags_offset = 0; continue; }
-        uint32_t off = (uint32_t)np.len;
+        off = (uint32_t)np.len;
         memcpy(np.data + np.len, str_pool.data + m->tags_offset, m->tags_length);
         np.len += m->tags_length;
         np.data[np.len++] = '\0';
@@ -3003,15 +3136,18 @@ static void rebuild_meta_dedup(void) {
         builder_meta_v4_t *m = &meta_db.items[i];
         char tagbuf[MAX_TAGS_JSON];
         const char *tags = "";
+        uint64_t key;
+        uint32_t bkt;
+        meta_dedup_entry_t *ent;
         if (m->tags_length && m->tags_length < MAX_TAGS_JSON) {
             memcpy(tagbuf, str_pool.data + m->tags_offset, m->tags_length);
             tagbuf[m->tags_length] = '\0';
             tags = tagbuf;
         }
-        uint64_t key = meta_make_key(m->confidence, m->type_mask, m->tlp_mask,
+        key = meta_make_key(m->confidence, m->type_mask, m->tlp_mask,
                                      m->category_mask, m->feed_mask, tags);
-        uint32_t bkt = (uint32_t)(key % META_DEDUP_BUCKETS);
-        meta_dedup_entry_t *ent = malloc(sizeof(*ent));
+        bkt = (uint32_t)(key % META_DEDUP_BUCKETS);
+        ent = malloc(sizeof(*ent));
         if (!ent) { fprintf(stderr, "FATAL: Out of Memory (meta dedup rebuild)\n"); exit(1); }
         ent->key = key; ent->meta_idx = (uint32_t)i;
         ent->next = meta_dedup_ht[bkt]; meta_dedup_ht[bkt] = ent;
@@ -3042,8 +3178,12 @@ static void ioc_dedup_seed(void) {
  * Returns the number of IOC rows dropped. */
 static size_t feed_snapshot_evict(const char *feed_key) {
     int fidx = find_feed_idx(feed_key);
+    uint64_t fbit;
+    uint32_t *remap;
+    size_t mw;
+    size_t dropped = 0, w;
     if (fidx < 0) return 0;            /* feed never seen - nothing to replace */
-    uint64_t fbit = (1ULL << (unsigned)fidx);
+    fbit = (1ULL << (unsigned)fidx);
 
     /* 1. Clear the feed bit on every metadata record. */
     for (size_t i = 0; i < meta_db.count; i++)
@@ -3051,9 +3191,9 @@ static size_t feed_snapshot_evict(const char *feed_key) {
 
     /* 2. Compact meta_db, dropping feed-exclusive (now feed_mask==0) records;
      *    build an old->new index remap (UINT32_MAX = dropped). */
-    uint32_t *remap = malloc((meta_db.count ? meta_db.count : 1) * sizeof(uint32_t));
+    remap = malloc((meta_db.count ? meta_db.count : 1) * sizeof(uint32_t));
     if (!remap) { fprintf(stderr, "FATAL: Out of Memory (evict remap)\n"); exit(1); }
-    size_t mw = 0;
+    mw = 0;
     for (size_t i = 0; i < meta_db.count; i++) {
         if (meta_db.items[i].feed_mask == 0) {
             remap[i] = UINT32_MAX;
@@ -3066,7 +3206,6 @@ static size_t feed_snapshot_evict(const char *feed_key) {
     meta_db.count = mw;
 
     /* 3. Compact IOC rows: drop those referencing a dropped meta, remap survivors. */
-    size_t dropped = 0, w;
     w = 0;
     for (size_t i = 0; i < ip_db.count; i++) {
         uint32_t nm = remap[ip_db.items[i].meta_idx];
@@ -3122,10 +3261,11 @@ typedef struct {
 static struct { feed_gen_t *items; size_t count; size_t cap; } g_gen = {0};
 
 static void gen_load(const char *path) {
-    g_gen.count = 0;
-    FILE *f = fopen(path, "r");
-    if (!f) return;
+    FILE *f;
     char line[256];
+    g_gen.count = 0;
+    f = fopen(path, "r");
+    if (!f) return;
     while (fgets(line, sizeof(line), f)) {
         char feed[THRT_FEED_NAME_MAX];
         unsigned long long g = 0, u = 0;
@@ -3170,9 +3310,15 @@ static void gen_remove(const char *feed) {
         }
 }
 static void gen_save(const char *path) {
-    char tmp[PATH_MAX + 32];            /* room for ".tmp.<pid>" suffix */
-    snprintf(tmp, sizeof(tmp), "%s.tmp.%d", path, getpid());
-    FILE *f = fopen(tmp, "w");
+    char tmp[PATH_MAX + 32];
+    FILE *f;
+    int n;
+    n = snprintf(tmp, sizeof(tmp), "%s.tmp.%d", path, (int)getpid());
+    if (n < 0 || (size_t)n >= sizeof(tmp)) {
+        fprintf(stderr, "%s gen file path too long: %s\n", ICON_WARN, path);
+        return;
+    }
+    f = fopen(tmp, "w");
     if (!f) { fprintf(stderr, "%s cannot write gen file %s: %s\n", ICON_WARN, tmp, strerror(errno)); return; }
     for (size_t i = 0; i < g_gen.count; i++)
         fprintf(f, "%s\t%llu\t%llu\n", g_gen.items[i].feed,
@@ -3208,19 +3354,31 @@ static void gen_free(void) {
 static int apply_delta_segment(const char *seg_path, const char *out_thrt,
                                const char *feed_key, int is_snapshot,
                                uint32_t ttl_days, uint64_t generation) {
+    char feedbuf[THRT_FEED_NAME_MAX];
+    struct stat sb;
+    char genpath[PATH_MAX + 32];
+    feed_gen_t *fg;
+    uint64_t prev_gen;
+    uint64_t new_gen;
+    const char *bn;
+    int is_stix;
+    int is_misp;
+    const char *ext;
+    int is_json;
+    int is_csv;
     builder_state_reset();
     ioc_dedup_reset();
     g_ioc_dedup_active = 0;
 
     /* Resolve the feed identity: explicit feed_key, else the filename stem. */
-    char feedbuf[THRT_FEED_NAME_MAX];
     if (feed_key && *feed_key) {
         snprintf(feedbuf, sizeof(feedbuf), "%s", feed_key);
     } else {
-        const char *bn = strrchr(seg_path, '/');
+        char *dot;
+        bn = strrchr(seg_path, '/');
         bn = bn ? bn + 1 : seg_path;
         snprintf(feedbuf, sizeof(feedbuf), "%s", bn);
-        char *dot = strrchr(feedbuf, '.');
+        dot = strrchr(feedbuf, '.');
         if (dot) *dot = 0;
         if (strcasestr(bn, ".stix.json") != NULL ||
             (strrchr(bn, '.') && strcasecmp(strrchr(bn, '.'), ".stix") == 0)) {
@@ -3232,16 +3390,15 @@ static int apply_delta_segment(const char *seg_path, const char *out_thrt,
     snprintf(g_default_source, sizeof(g_default_source), "%s", feedbuf);
 
     /* Reload the current on-disk DB to fold INTO it. */
-    struct stat sb;
     if (stat(out_thrt, &sb) == 0)
         load_existing_thrt(out_thrt);
 
     /* Generation companion file (anti-resurrection). */
-    char genpath[PATH_MAX + 32];        /* room for ".gen" suffix */
+            /* room for ".gen" suffix */
     snprintf(genpath, sizeof(genpath), "%s.gen", out_thrt);
     gen_load(genpath);
-    feed_gen_t *fg = gen_find(feedbuf);
-    uint64_t prev_gen = fg ? fg->generation : 0;
+    fg = gen_find(feedbuf);
+    prev_gen = fg ? fg->generation : 0;
     if (generation > 0 && fg && generation <= prev_gen) {
         fprintf(stderr,
                 "%s apply-delta: stale generation %llu <= %llu for feed '%s' - "
@@ -3251,7 +3408,7 @@ static int apply_delta_segment(const char *seg_path, const char *out_thrt,
         gen_free();
         return 0;
     }
-    uint64_t new_gen = (generation > 0) ? generation : prev_gen + 1;
+    new_gen = (generation > 0) ? generation : prev_gen + 1;
 
     /* (1) Snapshot-replace: drop this feed's prior contents before re-adding. */
     if (is_snapshot)
@@ -3284,14 +3441,14 @@ static int apply_delta_segment(const char *seg_path, const char *out_thrt,
     ioc_dedup_seed();
     g_ioc_dedup_active = 1;
 
-    const char *bn = strrchr(seg_path, '/');
+    bn = strrchr(seg_path, '/');
     bn = bn ? bn + 1 : seg_path;
-    int is_stix = (strcasestr(bn, ".stix.json") != NULL) ||
+    is_stix = (strcasestr(bn, ".stix.json") != NULL) ||
                   (strrchr(bn, '.') && strcasecmp(strrchr(bn, '.'), ".stix") == 0);
-    int is_misp = (strcasestr(bn, ".misp.json") != NULL);
-    const char *ext = strrchr(bn, '.');
-    int is_json = (ext && strcasecmp(ext, ".json") == 0);
-    int is_csv  = (ext && strcasecmp(ext, ".csv")  == 0);
+    is_misp = (strcasestr(bn, ".misp.json") != NULL);
+    ext = strrchr(bn, '.');
+    is_json = (ext && strcasecmp(ext, ".json") == 0);
+    is_csv = (ext && strcasecmp(ext, ".csv")  == 0);
     if (is_stix) {
         process_stix_json(seg_path);
     } else if (is_misp || is_json) {
@@ -3321,7 +3478,7 @@ static int apply_delta_segment(const char *seg_path, const char *out_thrt,
 /* ============================================================================
  * USAGE
  * ============================================================================ */
-void print_usage(const char* prog) {
+static void print_usage(const char* prog) {
     fprintf(stderr, "Usage: %s -o <out.thrt> [OPTIONS] <input1> [input2 ...]\n", prog);
     fprintf(stderr, "       %s --apply-delta <seg> -o <out.thrt> [--feed-key K] [--snapshot] [--ttl-days N]\n\n", prog);
     fprintf(stderr, "Options:\n");
@@ -3399,12 +3556,13 @@ int main(int argc, char **argv) {
     }
 
     if (delta_seg) {
+        int rc;
         if (!thrt_out) {
             fprintf(stderr, "Error: --apply-delta requires -o <out.thrt>\n\n");
             print_usage(argv[0]);
             exit(1);
         }
-        int rc = apply_delta_segment(delta_seg, thrt_out, delta_feed_key,
+        rc = apply_delta_segment(delta_seg, thrt_out, delta_feed_key,
                                      delta_is_snapshot, delta_ttl_days,
                                      delta_generation);
         return rc;

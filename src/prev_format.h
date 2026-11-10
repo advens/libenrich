@@ -102,15 +102,18 @@ _Static_assert(sizeof(prev_entry_t) == 16, "prev_entry_t must be 16 bytes (match
  * the distinct-internal-source count. Both are 0 on a miss (= rarest). */
 static inline uint32_t prev_lookup(
     const prev_entry_t* table, uint32_t slots, const char* key, uint16_t* edge_out, uint16_t* src_out) {
+    uint64_t hash;
+    uint32_t mask;
+    uint32_t idx;
     if (table == NULL || slots == 0 || key == NULL || key[0] == '\0') {
         if (edge_out) *edge_out = 0;
         if (src_out) *src_out = 0;
         return 0;
     }
-    uint64_t hash = prev_hash(key);
+    hash = prev_hash(key);
     if (hash == 0) hash = 1; /* 0 is the empty marker; keep real keys off it */
-    uint32_t mask = slots - 1;
-    uint32_t idx = (uint32_t)hash & mask;
+    mask = slots - 1;
+    idx = (uint32_t)hash & mask;
     for (int probes = 0; probes < PREV_PROBE_MAX; probes++) {
         const prev_entry_t* e = &table[idx];
         if (e->hash_key == 0) break; /* empty slot => not found => rare */
@@ -130,14 +133,17 @@ static inline uint32_t prev_lookup(
  * count via *slots_out) on success, NULL on any structural problem. Cheap:
  * magic/version/bounds + power-of-two slots. Callers mmap read-only then map. */
 static inline const prev_entry_t* prev_table_map(const void* base, size_t map_len, uint32_t* slots_out) {
+    const prev_header_t* h;
+    uint32_t slots;
+    size_t need;
     if (base == NULL || map_len < sizeof(prev_header_t)) return NULL;
-    const prev_header_t* h = (const prev_header_t*)base;
+    h = (const prev_header_t*)base;
     if (h->magic != PREV_MAGIC || h->version != PREV_VERSION) return NULL;
-    uint32_t slots = h->hash_slots;
+    slots = h->hash_slots;
     if (slots == 0 || (slots & (slots - 1)) != 0) return NULL; /* must be pow2 */
     if (h->offset_entries < sizeof(prev_header_t)) return NULL;
     /* entry array must fit inside the mapping */
-    size_t need = (size_t)h->offset_entries + (size_t)slots * sizeof(prev_entry_t);
+    need = (size_t)h->offset_entries + (size_t)slots * sizeof(prev_entry_t);
     if (need > map_len) return NULL;
     if (slots_out) *slots_out = slots;
     return (const prev_entry_t*)((const uint8_t*)base + h->offset_entries);
