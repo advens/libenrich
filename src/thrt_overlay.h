@@ -131,7 +131,7 @@ static inline uint32_t overlay_next_pow2(uint32_t v) {
  *   5. Build hash index: power-of-2 capacity >= entry_count * 2, linear probing
  *   6. Return allocated thrt_overlay_t
  */
-static inline thrt_overlay_t* thrt_overlay_load(const char* path) {
+static __attribute__((unused)) thrt_overlay_t* thrt_overlay_load(const char* path) {
     if (!path || !*path) return NULL;
 
     int fd = open(path, O_RDONLY);

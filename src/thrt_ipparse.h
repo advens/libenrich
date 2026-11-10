@@ -70,7 +70,7 @@ static inline int parse_prefix_len(const char* s, int max, int* out) {
  *
  * Returns 1 on success. Ranges wider than THRT_MIN_*_PREFIX are rejected so a
  * malformed feed cannot blanket the address space. */
-static inline int parse_ip_or_cidr(const char* value, int allow_cidr, parsed_ip_t* out) {
+static __attribute__((unused)) int parse_ip_or_cidr(const char* value, int allow_cidr, parsed_ip_t* out) {
     struct in_addr a4;
     struct in6_addr a6;
     const char* slash;
