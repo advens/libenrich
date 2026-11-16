@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+- `enrich sync` no longer keeps every MISP page in memory. Each page
+  is folded with `apply-delta` and released. The first page of a first
+  pull or `--full` is a snapshot of that feed. Later pages of that
+  pull add to it. `dest` is still one attribute-search body. The
+  on-disk `.thrt` layout is unchanged.
+
 ## [0.1.5]
 
 - `thrt_overlay_load` and `parse_ip_or_cidr` are no longer declared
