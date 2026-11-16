@@ -191,9 +191,11 @@ Content-Type: application/json
 ```
 
 `limit` defaults to 2000 (`--page-size`). The next page is requested
-until a page is shorter than that limit. The pages are written as one
-attribute-search body. A pull that returns no attributes leaves
-`dest`, the cursor, and `output` unchanged.
+until a page is shorter than that limit. Each page is released before
+the next request. The pages are still saved as one attribute-search
+body at `dest`. A pull that returns no attributes leaves `dest`, the
+cursor, and `output` unchanged. A server that keeps returning a full
+page stops after 100000 pages.
 
 The cursor is `<dest>.cursor`. It holds the newest attribute
 `timestamp`, and that value is the next `last`. The first pull, and
@@ -202,14 +204,18 @@ A failed pull leaves the previous `dest` and cursor in place.
 
 Without `--apply` the command stops after `dest` and the cursor. It
 does not change `output` and it does not signal rsyslog. With
-`--apply`, the first pull and any `--full` compile `output` through
-`build`. A later window is folded with `apply-delta --generation`.
-The generation is one higher than the value stored for that feed. A
-full body is not folded as a list of adds. On that later window,
-`deleted` true or `to_ids` false removes the indicator. A still-valid
-`to_ids` attribute is added. Type, confidence, TLP, and category stay
-the rules `build` already uses. A failed fold leaves the previous
-`dest`, cursor, and `output`, and does not signal.
+`--apply`, the first pull and any `--full` replace that MISP feed in
+`output`. The first page is `apply-delta --snapshot`. Each following
+page is `apply-delta` without `--snapshot`, so it adds to that feed
+instead of replacing the page before it. Indicators already stored
+under a different feed stay. Overlay feeds are written the same way
+`build` writes them. A later window is folded with `apply-delta` as
+well, one generation per page. On that later window, `deleted` true
+or `to_ids` false removes the indicator. A full pull does not treat
+those attributes as withdrawals. A still-valid `to_ids` attribute is
+added. Type, confidence, TLP, and category stay the rules `build`
+already uses. A failed fold leaves the previous `dest`, cursor, and
+`output`, and does not signal.
 
 `--segment FILE` reads a file already on disk and needs no MISP key.
 Without `--apply` it does not change `output`. With `--apply` it

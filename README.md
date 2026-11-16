@@ -42,9 +42,10 @@ is fetch, then build. `lookup` queries the database named by `output`.
 `apply-delta` folds one segment into that database. A `.stix` or
 `.stix.json` segment is STIX. A `.misp.json` segment, and any other
 `.json` segment, is MISP. A `.csv` segment is CSV. `sync` pages one
-MISP feed. The first pull, and `--full`, compiles through `build`.
-A later window is one `apply-delta` generation. The manual states
-the cursor, `--segment`, and `--follow`.
+MISP feed and releases each page before the next request. The first
+pull, and `--full`, replace that feed in the database one page at a
+time. A later window is folded the same way. The manual states the
+cursor, `--segment`, and `--follow`.
 
 MISP in the config, on its own:
 

@@ -21,8 +21,12 @@ static const char *full_rows[] = {
     "\"Tag\":[{\"name\":\"tlp:green\"}],"
     "\"Event\":{\"info\":\"sync-sample\",\"threat_level_id\":\"1\"}}",
     "{\"id\":\"2\",\"type\":\"ip-dst\",\"value\":\"203.0.113.202\","
-    "\"to_ids\":true,\"timestamp\":150,\"category\":\"Network activity\"}"
+    "\"to_ids\":true,\"timestamp\":150,\"category\":\"Network activity\"}",
+    "{\"id\":\"3\",\"type\":\"ip-dst\",\"value\":\"203.0.113.203\","
+    "\"to_ids\":true,\"timestamp\":180,\"category\":\"Network activity\"}"
 };
+
+static int g_fail_page;
 
 static const char *delta_rows[] = {
     "{\"id\":\"1\",\"type\":\"ip-dst\",\"value\":\"203.0.113.201\","
@@ -106,13 +110,19 @@ static void answer(int client)
     body = header_end != NULL ? header_end + 4 : req;
     if (last_is_timestamp(body)) {
         rows = delta_rows;
-        count = 1;
+        count = (int)(sizeof delta_rows / sizeof delta_rows[0]);
     } else {
         rows = full_rows;
-        count = 2;
+        count = (int)(sizeof full_rows / sizeof full_rows[0]);
     }
     page = json_int(body, "page", 1);
     limit = json_int(body, "limit", 2000);
+    if (g_fail_page > 0 && page >= g_fail_page) {
+        const char *err =
+            "HTTP/1.1 500 Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        (void)write(client, err, strlen(err));
+        return;
+    }
     start = (page - 1) * limit;
     used = 0;
     nw = snprintf(payload + used, sizeof payload - used,
@@ -144,8 +154,10 @@ static void answer(int client)
     (void)write(client, payload, used);
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
+    if (argc > 1 && strcmp(argv[1], "fail-page") == 0)
+        g_fail_page = 2;
     int srv, one = 1;
     struct sockaddr_in addr;
     socklen_t len = sizeof addr;

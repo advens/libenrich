@@ -456,6 +456,40 @@ static int is_thrt_type(const char *type)
            strcmp(type, "stix") == 0 || strcmp(type, "tags") == 0;
 }
 
+static int write_overlays(struct json_object *cfg)
+{
+    struct json_object *feeds = NULL;
+    int i, n;
+
+    if (!json_object_object_get_ex(cfg, "feeds", &feeds) || feeds == NULL)
+        return 0;
+    n = json_object_array_length(feeds);
+    for (i = 0; i < n; i++) {
+        struct json_object *feed = json_object_array_get_idx(feeds, i);
+        const char *type = jstr(feed, "type");
+        const char *dest;
+        char *ov[5];
+
+        if (type == NULL || strcmp(type, "overlay") != 0)
+            continue;
+        dest = jstr(feed, "dest");
+        if (dest == NULL) {
+            fprintf(stderr, "enrich: overlay feed needs dest\n");
+            return -1;
+        }
+        ov[0] = "enrich";
+        ov[1] = "write";
+        ov[2] = (char *)dest;
+        ov[3] = (char *)jstr(feed, "path");
+        ov[4] = NULL;
+        if (overlay_tool_main(ov[3] != NULL ? 4 : 3, ov) != 0) {
+            fprintf(stderr, "enrich: overlay write failed\n");
+            return -1;
+        }
+    }
+    return 0;
+}
+
 static int compile_output(struct json_object *cfg)
 {
     const char *out = jstr(cfg, "output");
@@ -468,6 +502,8 @@ static int compile_output(struct json_object *cfg)
         fprintf(stderr, "enrich: config output is missing\n");
         return -1;
     }
+    if (write_overlays(cfg) != 0)
+        return -1;
     argv[argc++] = "enrich";
     argv[argc++] = "-o";
     argv[argc++] = (char *)out;
@@ -480,24 +516,8 @@ static int compile_output(struct json_object *cfg)
             const char *path, *layer;
             if (type == NULL)
                 continue;
-            if (strcmp(type, "overlay") == 0) {
-                const char *dest = jstr(feed, "dest");
-                char *ov[5];
-                if (dest == NULL) {
-                    fprintf(stderr, "enrich: overlay feed needs dest\n");
-                    return -1;
-                }
-                ov[0] = "enrich";
-                ov[1] = "write";
-                ov[2] = (char *)dest;
-                ov[3] = (char *)jstr(feed, "path");
-                ov[4] = NULL;
-                if (overlay_tool_main(ov[3] != NULL ? 4 : 3, ov) != 0) {
-                    fprintf(stderr, "enrich: overlay write failed\n");
-                    return -1;
-                }
+            if (strcmp(type, "overlay") == 0)
                 continue;
-            }
             if (!is_thrt_type(type))
                 continue;
             path = jstr(feed, "path");
@@ -910,128 +930,287 @@ static void misp_endpoint(const char *url, char *endpoint, size_t n)
     memcpy(endpoint + len, suffix, strlen(suffix) + 1);
 }
 
-/* Pull every page into one attribute-search body. 0 writes body_path.
- * 1 means the window was empty. -1 leaves dest alone. */
-static int pull_misp(const char *url, const char *key, const char *last,
-                     int page_size, const char *dest, char *body_path, size_t body_pathsz,
+/* A server that returns a full page forever has to stop somewhere.
+ * This is not a memory cap: each page is released before the next one. */
+#define MISP_PAGE_CAP 100000
+
+static int copy_file(const char *src, const char *dst)
+{
+    int in, out;
+    char buf[65536];
+    ssize_t n;
+    int failed = 0;
+
+    in = open(src, O_RDONLY | O_CLOEXEC);
+    if (in < 0)
+        return -1;
+    out = open(dst, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    if (out < 0) {
+        close(in);
+        return -1;
+    }
+    while ((n = read(in, buf, sizeof buf)) > 0) {
+        ssize_t off = 0;
+
+        while (off < n) {
+            ssize_t w = write(out, buf + off, (size_t)(n - off));
+            if (w < 0) {
+                if (errno == EINTR)
+                    continue;
+                failed = 1;
+                break;
+            }
+            off += w;
+        }
+        if (failed)
+            break;
+    }
+    if (n < 0)
+        failed = 1;
+    if (close(out) != 0)
+        failed = 1;
+    close(in);
+    if (failed) {
+        unlink(dst);
+        return -1;
+    }
+    return 0;
+}
+
+static void discard_work(const char *work)
+{
+    char gen[1100];
+    int nw;
+
+    if (work == NULL || work[0] == '\0')
+        return;
+    unlink(work);
+    nw = snprintf(gen, sizeof gen, "%s.gen", work);
+    if (nw > 0 && (size_t)nw < sizeof gen)
+        unlink(gen);
+}
+
+/* Snapshot replaces one feed inside the database that already exists.
+ * The copy is thrown away if a later page fails, so output stays as it was. */
+static int prepare_fold(struct json_object *cfg, const char *out, const char *work,
+                        int snapshot)
+{
+    char src_gen[1100];
+    char dst_gen[1100];
+    int nw;
+
+    if (snapshot && write_overlays(cfg) != 0)
+        return -1;
+    if (out == NULL || out[0] == '\0')
+        return -1;
+    if (access(out, F_OK) == 0 && copy_file(out, work) != 0)
+        return -1;
+    nw = snprintf(src_gen, sizeof src_gen, "%s.gen", out);
+    if (nw < 0 || (size_t)nw >= sizeof src_gen)
+        return -1;
+    nw = snprintf(dst_gen, sizeof dst_gen, "%s.gen", work);
+    if (nw < 0 || (size_t)nw >= sizeof dst_gen)
+        return -1;
+    if (access(src_gen, F_OK) == 0 && copy_file(src_gen, dst_gen) != 0)
+        return -1;
+    return 0;
+}
+
+static int finish_body(FILE *body)
+{
+    if (fputs("]}}", body) == EOF) {
+        fclose(body);
+        return -1;
+    }
+    if (fclose(body) != 0)
+        return -1;
+    return 0;
+}
+
+static int install_output(const char *work, const char *out)
+{
+    char gen_src[1100];
+    char gen_dst[1100];
+    char bak[1100];
+    char gen_bak[1100];
+    int had = 0;
+    int had_gen = 0;
+    int nw;
+    int gen_exists;
+
+    nw = snprintf(gen_src, sizeof gen_src, "%s.gen", work);
+    if (nw < 0 || (size_t)nw >= sizeof gen_src)
+        return -1;
+    nw = snprintf(gen_dst, sizeof gen_dst, "%s.gen", out);
+    if (nw < 0 || (size_t)nw >= sizeof gen_dst)
+        return -1;
+    gen_exists = access(gen_src, F_OK) == 0;
+    if (swap_in(work, out, bak, sizeof bak, &had) != 0)
+        return -1;
+    if (gen_exists) {
+        if (swap_in(gen_src, gen_dst, gen_bak, sizeof gen_bak, &had_gen) != 0) {
+            restore_swap(out, bak, had);
+            return -1;
+        }
+        if (had_gen)
+            unlink(gen_bak);
+    }
+    if (had)
+        unlink(bak);
+    return 0;
+}
+
+/* One page in memory at a time. 0 leaves body_path complete and, when
+ * apply is set, work_path folded. 1 means the window was empty and
+ * nothing was written. -1 leaves dest and output alone. The json-c
+ * tree is freed before the fold and before the next request. */
+static int pull_misp(struct json_object *cfg, const char *url, const char *key,
+                     const char *last, int page_size, const char *dest,
+                     const char *out, const char *feed, int apply, int snapshot,
+                     char *body_path, size_t body_pathsz,
+                     char *work_path, size_t work_pathsz,
                      uint64_t *newest_out)
 {
     char endpoint[1024];
     char hdr[700];
     char page_path[1100];
-    struct json_object *merged;
+    FILE *body = NULL;
     int page;
-    uint64_t newest = 0;
+    int first = 1;
     int saw = 0;
+    int prepared = 0;
+    int folds = 0;
+    uint64_t newest = 0;
+    int pid = (int)getpid();
+    int nw;
 
-    if (strlen(dest) + 32 >= sizeof page_path || strlen(dest) + 32 >= body_pathsz)
-        return -1;
+    body_path[0] = '\0';
+    work_path[0] = '\0';
     if (strlen(key) + strlen("Authorization: ") >= sizeof hdr)
         die("misp key is too long");
+    if (apply && (out == NULL || out[0] == '\0'))
+        return -1;
     misp_endpoint(url, endpoint, sizeof endpoint);
     snprintf(hdr, sizeof hdr, "Authorization: %s", key);
-    snprintf(page_path, sizeof page_path, "%s.page.%d", dest, (int)getpid());
-    snprintf(body_path, body_pathsz, "%s.pull.%d.misp.json", dest, (int)getpid());
-    merged = json_object_new_array();
-    if (merged == NULL)
+    nw = snprintf(page_path, sizeof page_path, "%s.page.%d.misp.json", dest, pid);
+    if (nw < 0 || (size_t)nw >= sizeof page_path)
         return -1;
+    nw = snprintf(body_path, body_pathsz, "%s.pull.%d.misp.json", dest, pid);
+    if (nw < 0 || (size_t)nw >= body_pathsz)
+        return -1;
+    if (apply) {
+        nw = snprintf(work_path, work_pathsz, "%s.work.%d", out, pid);
+        if (nw < 0 || (size_t)nw >= work_pathsz)
+            return -1;
+    }
 
-    for (page = 1; page <= 1000; page++) {
-        char body[256];
+    for (page = 1; page <= MISP_PAGE_CAP; page++) {
+        char req[256];
         struct json_object *root;
         struct json_object *attrs;
-        int n, i;
+        int n;
+        int valid = 0;
+        int i;
 
-        snprintf(body, sizeof body,
+        snprintf(req, sizeof req,
                  "{\"returnFormat\":\"json\",\"last\":\"%s\",\"to_ids\":1,\"limit\":%d,\"page\":%d}",
                  last, page_size, page);
-        if (curl_to_file(endpoint, NULL, hdr, body, page_path) != 0) {
-            unlink(page_path);
-            json_object_put(merged);
+        if (curl_to_file(endpoint, NULL, hdr, req, page_path) != 0) {
             fprintf(stderr, "enrich: misp download failed\n");
-            return -1;
+            goto fail;
         }
         root = load_json_file(page_path);
-        unlink(page_path);
         if (root == NULL) {
-            json_object_put(merged);
             fprintf(stderr, "enrich: misp page is not an attribute search\n");
-            return -1;
+            goto fail;
         }
         attrs = attribute_array(root);
         if (attrs == NULL || !json_object_is_type(attrs, json_type_array)) {
             json_object_put(root);
-            json_object_put(merged);
             fprintf(stderr, "enrich: misp page is not an attribute search\n");
-            return -1;
+            goto fail;
         }
         n = json_object_array_length(attrs);
         for (i = 0; i < n; i++) {
             struct json_object *one = json_object_array_get_idx(attrs, i);
+            const char *text;
             uint64_t ts;
+
             if (one == NULL || !json_object_is_type(one, json_type_object))
                 continue;
+            if (body == NULL) {
+                body = fopen(body_path, "w");
+                if (body == NULL ||
+                    fputs("{\"response\":{\"Attribute\":[", body) == EOF) {
+                    json_object_put(root);
+                    goto fail;
+                }
+            }
             ts = json_timestamp(one);
             if (ts > newest)
                 newest = ts;
-            json_object_get(one);
-            if (json_object_array_add(merged, one) != 0) {
-                json_object_put(one);
+            text = json_object_to_json_string(one);
+            if (text == NULL ||
+                (!first && fputc(',', body) == EOF) ||
+                fputs(text, body) == EOF) {
                 json_object_put(root);
-                json_object_put(merged);
-                return -1;
+                goto fail;
             }
+            first = 0;
+            valid++;
             saw = 1;
         }
         json_object_put(root);
+
+        /* A later page of the same snapshot must not evict the page
+         * just folded. Only the first page of a full pull is a snapshot.
+         * An incremental window is all adds and withdrawals. */
+        if (valid > 0 && apply) {
+            if (!prepared) {
+                if (prepare_fold(cfg, out, work_path, snapshot) != 0)
+                    goto fail;
+                prepared = 1;
+            }
+            if (fold_segment(page_path, work_path, feed,
+                             (snapshot && folds == 0) ? 1 : 0,
+                             NULL, NULL, snapshot ? 0 : 1) != 0) {
+                fprintf(stderr, "enrich: apply-delta failed\n");
+                goto fail;
+            }
+            folds++;
+        }
+        unlink(page_path);
         if (n < page_size)
             break;
-        if (page == 1000) {
-            json_object_put(merged);
+        if (page == MISP_PAGE_CAP) {
             fprintf(stderr, "enrich: misp page limit reached\n");
-            return -1;
+            goto fail;
         }
     }
     if (!saw) {
-        json_object_put(merged);
+        if (body != NULL) {
+            fclose(body);
+            unlink(body_path);
+        }
+        discard_work(work_path);
         return 1;
     }
-    {
-        struct json_object *resp = json_object_new_object();
-        struct json_object *wrap = json_object_new_object();
-        const char *text;
-        FILE *f;
-        int failed = 0;
-
-        if (resp == NULL || wrap == NULL) {
-            if (resp != NULL)
-                json_object_put(resp);
-            if (wrap != NULL)
-                json_object_put(wrap);
-            json_object_put(merged);
-            return -1;
-        }
-        json_object_get(merged);
-        json_object_object_add(resp, "Attribute", merged);
-        json_object_object_add(wrap, "response", resp);
-        text = json_object_to_json_string(wrap);
-        f = fopen(body_path, "w");
-        if (f == NULL || text == NULL || fputs(text, f) == EOF) {
-            failed = 1;
-            if (f != NULL)
-                fclose(f);
-        } else if (fclose(f) != 0) {
-            failed = 1;
-        }
-        json_object_put(wrap);
-        json_object_put(merged);
-        if (failed) {
-            unlink(body_path);
-            return -1;
-        }
+    if (finish_body(body) != 0) {
+        body = NULL;
+        goto fail;
     }
+    body = NULL;
     *newest_out = newest;
     return 0;
+
+fail:
+    if (body != NULL)
+        fclose(body);
+    unlink(page_path);
+    if (body_path[0] != '\0')
+        unlink(body_path);
+    discard_work(work_path);
+    return -1;
 }
 
 static struct json_object *misp_feed(struct json_object *cfg, const char *name)
@@ -1068,8 +1247,10 @@ static struct json_object *misp_feed(struct json_object *cfg, const char *name)
     return found;
 }
 
+#ifdef HAVE_LIBZMQ
 /* Rename body onto dest when the fold is not a build. snapshot installs
- * dest first, then build, and puts the previous dest back if build fails. */
+ * dest first, then build, and puts the previous dest back if build fails.
+ * The paged pull does not use this. --follow flushes one bucket through it. */
 static int commit_body(struct json_object *cfg, const char *dest, const char *body,
                        uint64_t newest, int apply, int snapshot, int misp_delta,
                        const char *feed_key, int do_hup, const char *hup_cmd)
@@ -1125,6 +1306,7 @@ static int commit_body(struct json_object *cfg, const char *dest, const char *bo
         signal_rsyslog(hup_cmd);
     return 0;
 }
+#endif
 
 static void sync_segment(struct json_object *cfg, const char *segment,
                          const char *feed_key, int apply, int full,
@@ -1165,12 +1347,17 @@ static void sync_pull(struct json_object *cfg, const char *cfg_path,
     const char *dest;
     const char *since;
     const char *last;
+    const char *out;
     char cursor[64];
+    char stem[64];
     char body_path[1100];
+    char work_path[1100];
+    char dest_bak[1100];
     uint64_t newest = 0;
     int have;
     int pulled;
     int snapshot;
+    int had_dest = 0;
     struct stat st;
 
     feed = misp_feed(cfg, feed_key);
@@ -1187,6 +1374,12 @@ static void sync_pull(struct json_object *cfg, const char *cfg_path,
         since = "7d";
     if (!is_window_token(since))
         die("misp since is not a window");
+    out = NULL;
+    if (apply) {
+        out = jstr(cfg, "output");
+        if (out == NULL)
+            die("config output is missing");
+    }
     have = read_cursor(dest, cursor, sizeof cursor);
     if (full || !have) {
         last = since;
@@ -1195,18 +1388,33 @@ static void sync_pull(struct json_object *cfg, const char *cfg_path,
         last = cursor;
         snapshot = 0;
     }
-    pulled = pull_misp(url, key, last, page_size, dest, body_path, sizeof body_path, &newest);
+    /* The fold identity is the dest stem, the same name build uses. */
+    feed_stem(dest, stem, sizeof stem);
+    pulled = pull_misp(cfg, url, key, last, page_size, dest, out, stem,
+                       apply, snapshot, body_path, sizeof body_path,
+                       work_path, sizeof work_path, &newest);
     if (pulled < 0)
         die("misp sync failed");
     if (pulled > 0) {
         fprintf(stderr, "enrich: misp returned no attributes\n");
         return;
     }
-    if (commit_body(cfg, dest, body_path, newest, apply, snapshot, 1,
-                    NULL, do_hup, hup_cmd) != 0) {
+    if (swap_in(body_path, dest, dest_bak, sizeof dest_bak, &had_dest) != 0) {
         unlink(body_path);
+        discard_work(work_path);
         die("misp sync failed");
     }
+    if (apply && install_output(work_path, out) != 0) {
+        restore_swap(dest, dest_bak, had_dest);
+        discard_work(work_path);
+        die("misp sync failed");
+    }
+    if (had_dest)
+        unlink(dest_bak);
+    if (write_cursor(dest, newest) != 0)
+        fprintf(stderr, "enrich: cursor was not written\n");
+    if (apply && do_hup)
+        signal_rsyslog(hup_cmd);
 }
 
 #ifdef HAVE_LIBZMQ
