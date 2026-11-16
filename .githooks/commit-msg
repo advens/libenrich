@@ -1,3 +1,4 @@
 #!/bin/sh
+# Installed via: git config core.hooksPath .githooks
 root=$(git rev-parse --show-toplevel)
 exec "$root/scripts/check-commit-msg.sh" "$1"

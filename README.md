@@ -122,3 +122,15 @@ deployment already has.
 Headers install under `include/enrich/`. `libenrich.so` exports
 `enrich_version()`. The on-disk formats are header-only. Link with
 `pkg-config enrich`.
+
+## Contributing
+
+`docs/COMMIT.md` is the commit contract and `docs/BRANCHES.md` the branch
+contract; every commit and every squash-merged PR must pass
+`scripts/check-commit-msg.sh`, which CI enforces. See `CONTRIBUTING.md` and
+`CODE_OF_CONDUCT.md`.
+
+## Security
+
+See `SECURITY.md`. Report privately; do not open a public issue for a
+loader bug before a fix ships.

@@ -1,0 +1,58 @@
+name: Bug
+description: Something the builder, the CLI, or a loader got wrong
+title: "fix(<scope>): "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Scope in the title must be one of
+        `format` `cli` `build` `docs` `test`.
+        This is a C library; host-integration glue is out of scope here.
+        See [CONTRIBUTING.md](https://github.com/advens/libenrich/blob/main/CONTRIBUTING.md)
+        for the commit and branch contract.
+  - type: input
+    id: commit
+    attributes:
+      label: Commit or tag
+      placeholder: 7048b44 or 0.1.5
+    validations:
+      required: true
+  - type: dropdown
+    id: arch
+    attributes:
+      label: Architecture
+      options: [aarch64, amd64, both, other]
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS
+      placeholder: "FreeBSD 14, Debian 12, macOS 15"
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: Observed vs expected. Not a file list.
+    validations:
+      required: true
+  - type: textarea
+    id: proof
+    attributes:
+      label: Proof
+      description: Command and the lines that show the failure. Silence is not proof.
+      placeholder: |
+        make test
+        ...
+      render: shell
+    validations:
+      required: true
+  - type: dropdown
+    id: contract
+    attributes:
+      label: Frozen surface
+      description: Leave blank if no frozen surface is affected.
+      options: [abi, format]
