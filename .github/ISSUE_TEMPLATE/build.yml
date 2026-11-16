@@ -1,0 +1,44 @@
+name: Build
+description: Compile, link, pkg-config, or CI harness
+title: "build(<scope>): "
+labels: ["build"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Scope is `build`, `cli`, `github`, `docs`, or `test`.
+        See [CONTRIBUTING.md](https://github.com/advens/libenrich/blob/main/CONTRIBUTING.md)
+        for the commit and branch contract.
+  - type: input
+    id: commit
+    attributes:
+      label: Commit or tag
+    validations:
+      required: true
+  - type: dropdown
+    id: arch
+    attributes:
+      label: Architecture
+      options: [aarch64, amd64, both, other]
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What failed
+    validations:
+      required: true
+  - type: textarea
+    id: proof
+    attributes:
+      label: Proof
+      description: Exact command and output.
+      render: shell
+    validations:
+      required: true
+  - type: dropdown
+    id: contract
+    attributes:
+      label: Frozen surface
+      description: Leave blank if no frozen surface is affected.
+      options: [abi, format]
