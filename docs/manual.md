@@ -205,12 +205,12 @@ A failed pull leaves the previous `dest` and cursor in place.
 Without `--apply` the command stops after `dest` and the cursor. It
 does not change `output` and it does not signal rsyslog. With
 `--apply`, the first pull and any `--full` replace that MISP feed in
-`output`. The first page is `apply-delta --snapshot`. Each following
-page is `apply-delta` without `--snapshot`, so it adds to that feed
-instead of replacing the page before it. Indicators already stored
-under a different feed stay. Overlay feeds are written the same way
-`build` writes them. A later window is folded with `apply-delta` as
-well, one generation per page. On that later window, `deleted` true
+`output`. Every page of that pull is folded into one database, and
+the database is written once. The feed is snapshotted once, before
+the first page, so a later page adds to it instead of replacing it.
+Indicators already stored under a different feed stay. Overlay feeds
+are written the same way `build` writes them. A later window is one
+generation of `apply-delta`. On that later window, `deleted` true
 or `to_ids` false removes the indicator. A full pull does not treat
 those attributes as withdrawals. A still-valid `to_ids` attribute is
 added. Type, confidence, TLP, and category stay the rules `build`

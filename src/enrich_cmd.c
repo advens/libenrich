@@ -32,6 +32,11 @@ int thrt_cli_main(int argc, char **argv);
 int overlay_tool_main(int argc, char **argv);
 int prev_lookup_main(int argc, char **argv);
 void thrt_misp_delta_mode(int on);
+int thrt_fold_begin(const char *out, const char *feed, int snapshot,
+                    int misp_delta, uint32_t ttl_days, uint64_t generation);
+int thrt_fold_page(const char *path);
+int thrt_fold_commit(void);
+void thrt_fold_abort(void);
 
 #define MAX_ARGV 256
 #define MAX_FEEDS 128
@@ -1061,9 +1066,10 @@ static int install_output(const char *work, const char *out)
 }
 
 /* One page in memory at a time. 0 leaves body_path complete and, when
- * apply is set, work_path folded. 1 means the window was empty and
- * nothing was written. -1 leaves dest and output alone. The json-c
- * tree is freed before the fold and before the next request. */
+ * apply is set, work_path written once for the whole pull. 1 means the
+ * window was empty and nothing was written. -1 leaves dest and output
+ * alone. The json-c tree is freed before the page is folded and before
+ * the next request. */
 static int pull_misp(struct json_object *cfg, const char *url, const char *key,
                      const char *last, int page_size, const char *dest,
                      const char *out, const char *feed, int apply, int snapshot,
@@ -1079,7 +1085,6 @@ static int pull_misp(struct json_object *cfg, const char *url, const char *key,
     int first = 1;
     int saw = 0;
     int prepared = 0;
-    int folds = 0;
     uint64_t newest = 0;
     int pid = (int)getpid();
     int nw;
@@ -1162,22 +1167,24 @@ static int pull_misp(struct json_object *cfg, const char *url, const char *key,
         }
         json_object_put(root);
 
-        /* A later page of the same snapshot must not evict the page
-         * just folded. Only the first page of a full pull is a snapshot.
-         * An incremental window is all adds and withdrawals. */
+        /* Snapshot once, then every page adds. The database is written
+         * after the last page. An incremental window is all adds and
+         * withdrawals, still one write. */
         if (valid > 0 && apply) {
             if (!prepared) {
                 if (prepare_fold(cfg, out, work_path, snapshot) != 0)
                     goto fail;
+                if (thrt_fold_begin(work_path, feed, snapshot ? 1 : 0,
+                                    snapshot ? 0 : 1, 0, 0) != 0) {
+                    fprintf(stderr, "enrich: apply-delta failed\n");
+                    goto fail;
+                }
                 prepared = 1;
             }
-            if (fold_segment(page_path, work_path, feed,
-                             (snapshot && folds == 0) ? 1 : 0,
-                             NULL, NULL, snapshot ? 0 : 1) != 0) {
+            if (thrt_fold_page(page_path) != 0) {
                 fprintf(stderr, "enrich: apply-delta failed\n");
                 goto fail;
             }
-            folds++;
         }
         unlink(page_path);
         if (n < page_size)
@@ -1200,10 +1207,13 @@ static int pull_misp(struct json_object *cfg, const char *url, const char *key,
         goto fail;
     }
     body = NULL;
+    if (prepared && thrt_fold_commit() != 0)
+        goto fail;
     *newest_out = newest;
     return 0;
 
 fail:
+    thrt_fold_abort();
     if (body != NULL)
         fclose(body);
     unlink(page_path);

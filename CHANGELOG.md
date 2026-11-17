@@ -10,6 +10,14 @@ The frozen surfaces are the C ABI and the on-disk `.thrt`, `.ovly`, and
 
 ## [Unreleased]
 
+### Fixed
+
+- `enrich sync` writes the threat database once per pull. Each MISP
+  page is still released before the next request. A later page adds
+  to that feed instead of replacing it. A later window is one
+  generation. The C ABI, the SONAME (`libenrich.so.0`), and the
+  on-disk formats are unchanged.
+
 ## [0.1.6] - 2026-11-16
 
 PATCH: each MISP page is folded and released. The C ABI, the SONAME
