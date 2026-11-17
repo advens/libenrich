@@ -2247,8 +2247,10 @@ static const char *misp_parse_response_object(const char *p, const char *end,
 }
 
 /* Main MISP JSON processor.
- * Event export, event search, and attribute search. */
-static void process_misp_json(const char *filename) {
+ * Event export, event search, and attribute search.
+ * Returns 0 when the file was read. Returns -1 when it could not be opened.
+ * An unrecognized body is a warning and still returns 0. */
+static int process_misp_json(const char *filename) {
     int fd = open(filename, O_RDONLY);
     struct stat sb;
     const char *map;
@@ -2258,20 +2260,20 @@ static void process_misp_json(const char *filename) {
     size_t emitted = 0, skipped = 0;
     if (fd < 0) {
         fprintf(stderr, "Error opening %s: %s\n", filename, strerror(errno));
-        exit(1);
+        return -1;
     }
 
     if (fstat(fd, &sb) < 0 || sb.st_size == 0) {
         fprintf(stderr, "%s Empty or unreadable file: %s\n", ICON_WARN, filename);
         close(fd);
-        return;
+        return 0;
     }
 
     map = (const char *)mmap(NULL, sb.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
     if (map == MAP_FAILED) {
         fprintf(stderr, "mmap failed for %s: %s\n", filename, strerror(errno));
         close(fd);
-        exit(1);
+        return -1;
     }
 
 #ifdef MADV_SEQUENTIAL
@@ -2376,6 +2378,7 @@ done:
 
     munmap((void *)map, sb.st_size);
     close(fd);
+    return 0;
 }
 
 /* ============================================================================
@@ -2494,7 +2497,8 @@ static void process_file(const char* filename) {
     }
     /* MISP JSON exports (.misp, .misp.json) */
     else if (strcasestr(filename, ".misp.json") || strcasecmp(ext, ".misp") == 0) {
-        process_misp_json(filename);
+        if (process_misp_json(filename) != 0)
+            exit(1);
     }
     else if (strcasecmp(ext, ".json") == 0) {
         process_cti_json(filename);
@@ -2634,6 +2638,51 @@ static void load_existing_thrt(const char *filename) {
 /* ============================================================================
  * WRITE THRT DATABASE (V4)
  * ============================================================================ */
+/* Drop IOC rows named by the delete set. Meta rows stay. The caller
+ * rebuilds dedup when another page may add those values back. */
+static void apply_delete_set(void) {
+    size_t orig;
+    size_t w;
+
+    if (!g_delete_set || g_delete_set->count == 0)
+        return;
+
+    orig = ip_db.count;
+    w = 0;
+    for (size_t i = 0; i < ip_db.count; i++) {
+        char buf[INET_ADDRSTRLEN];
+        uint32_t ip_net = htonl(ip_db.items[i].start);
+        inet_ntop(AF_INET, &ip_net, buf, sizeof(buf));
+        if (!delete_set_contains(thrt_hash(buf)))
+            ip_db.items[w++] = ip_db.items[i];
+    }
+    if (g_verbose && w < orig)
+        printf("   [DELETE] Removed %zu/%zu IPv4 entries\n", orig - w, orig);
+    ip_db.count = w;
+
+    orig = ip6_db.count;
+    w = 0;
+    for (size_t i = 0; i < ip6_db.count; i++) {
+        char buf[INET6_ADDRSTRLEN];
+        inet_ntop(AF_INET6, ip6_db.items[i].start, buf, sizeof(buf));
+        if (!delete_set_contains(thrt_hash(buf)))
+            ip6_db.items[w++] = ip6_db.items[i];
+    }
+    if (g_verbose && w < orig)
+        printf("   [DELETE] Removed %zu/%zu IPv6 entries\n", orig - w, orig);
+    ip6_db.count = w;
+
+    orig = str_db.count;
+    w = 0;
+    for (size_t i = 0; i < str_db.count; i++) {
+        if (!delete_set_contains(str_db.items[i].hash))
+            str_db.items[w++] = str_db.items[i];
+    }
+    if (g_verbose && w < orig)
+        printf("   [DELETE] Removed %zu/%zu string entries\n", orig - w, orig);
+    str_db.count = w;
+}
+
 static void write_thrt(const char *filename) {
     char tmp_filename[PATH_MAX + 32];
     FILE *f;
@@ -2643,52 +2692,8 @@ static void write_thrt(const char *filename) {
     uint64_t offset;
     size_t accel_pad;
     uint32_t checksum;
-    /* --- Incremental: filter out deleted entries before building --- */
-    if (g_delete_set && g_delete_set->count > 0) {
-        size_t orig;
-        size_t w;
 
-        /* Filter IPv4 ranges: hash the string representation of each IP */
-        orig = ip_db.count;
-        w = 0;
-        for (size_t i = 0; i < ip_db.count; i++) {
-            char buf[INET_ADDRSTRLEN];
-            uint32_t ip_net = htonl(ip_db.items[i].start);
-            inet_ntop(AF_INET, &ip_net, buf, sizeof(buf));
-            if (!delete_set_contains(thrt_hash(buf))) {
-                ip_db.items[w++] = ip_db.items[i];
-            }
-        }
-        if (g_verbose && w < orig)
-            printf("   [DELETE] Removed %zu/%zu IPv4 entries\n", orig - w, orig);
-        ip_db.count = w;
-
-        /* Filter IPv6 ranges */
-        orig = ip6_db.count;
-        w = 0;
-        for (size_t i = 0; i < ip6_db.count; i++) {
-            char buf[INET6_ADDRSTRLEN];
-            inet_ntop(AF_INET6, ip6_db.items[i].start, buf, sizeof(buf));
-            if (!delete_set_contains(thrt_hash(buf))) {
-                ip6_db.items[w++] = ip6_db.items[i];
-            }
-        }
-        if (g_verbose && w < orig)
-            printf("   [DELETE] Removed %zu/%zu IPv6 entries\n", orig - w, orig);
-        ip6_db.count = w;
-
-        /* Filter string entries (domains, hashes, emails) - hash is already stored */
-        orig = str_db.count;
-        w = 0;
-        for (size_t i = 0; i < str_db.count; i++) {
-            if (!delete_set_contains(str_db.items[i].hash)) {
-                str_db.items[w++] = str_db.items[i];
-            }
-        }
-        if (g_verbose && w < orig)
-            printf("   [DELETE] Removed %zu/%zu string entries\n", orig - w, orig);
-        str_db.count = w;
-    }
+    apply_delete_set();
 
     /* Sort arrays */
     if (ip_db.count > 0) qsort(ip_db.items, ip_db.count, sizeof(builder_ip_t), cmp_ip);
@@ -2861,10 +2866,10 @@ static void write_thrt(const char *filename) {
  * GLOBAL-STATE RESET
  *
  * The one-shot full build accumulates every input file into the global builder
- * arrays and writes once at exit. The --apply-delta fold instead
- * reloads the on-disk DB (load_existing_thrt), applies ONE segment, and rewrites
- * - so it clears the in-memory arrays first via this reset. Without it the
- * previous run's entries would be re-emitted into the next write (double count).
+ * arrays and writes once at exit. A fold reloads the on-disk DB
+ * (load_existing_thrt), applies one or more segments, and rewrites.
+ * This reset runs before that reload. Without it the previous run's
+ * entries would be re-emitted into the next write (double count).
  * ============================================================================ */
 static void builder_state_reset(void) {
     free(meta_db.items);  meta_db.items = NULL;  meta_db.count = 0;  meta_db.cap = 0;
@@ -3342,53 +3347,212 @@ static void gen_free(void) {
 }
 
 /* ============================================================================
- * ONE-SHOT DELTA FOLD
+ * DELTA FOLD
  *
- * Folds exactly ONE delta segment into out_thrt, idempotently, then exits.
- * One segment per invocation, in a separate process, so a malformed segment
- * cannot take down a long-running reader. It does not scan a directory or move
- * files: whoever delivers a segment owns staging it and signalling the reload.
+ * Load the database once, fold one or more segments, then write once.
+ * apply-delta is one segment. enrich sync is one segment per MISP page
+ * and one write for the pull. A malformed segment does not write.
  *
  * Three guards keep a re-delivered segment from growing the database:
- *   (1) snapshot-replace - is_snapshot evicts feed_key's prior IOCs first.
- *   (2) (type,value) dedup - re-delivered IOCs (incl. IP ranges) don't append.
- *   (3) bounded write - load -> apply -> write_thrt (atomic tmp+rename).
+ *   (1) snapshot-replace. is_snapshot evicts feed_key's prior IOCs first.
+ *   (2) (type,value) dedup. Re-delivered IOCs, including IP ranges, do not append.
+ *   (3) one write. load, apply, write_thrt (atomic tmp+rename).
  * A generation companion file adds anti-resurrection and feed-level TTL.
+ * One successful pull advances that generation by one, not by one per page.
+ *
+ * A page that withdraws an indicator applies that delete before the next
+ * page, then rebuilds dedup, so a later page can add the same value back.
  *
  * TTL: per-IOC expiry is NOT persisted in .thrt (the V4 thrt_metadata_t is a
  * full 24B dedup-shared record; per-IOC expiry would need a V5 ABI bump and a
  * matching reader change). ttl_days only prunes expired entries at fold time,
  * before the write; it is not stored as a per-IOC field.
  * ============================================================================ */
+static int g_fold_active = 0;
+static char g_fold_out[PATH_MAX];
+static char g_fold_feed[THRT_FEED_NAME_MAX];
+static char g_fold_genpath[PATH_MAX + 32];
+static uint64_t g_fold_gen = 0;
+
+static void fold_close_state(void) {
+    g_ioc_dedup_active = 0;
+    ioc_dedup_reset();
+    gen_free();
+    builder_state_reset();
+    thrt_misp_delta_mode(0);
+    g_fold_active = 0;
+    g_fold_out[0] = '\0';
+    g_fold_feed[0] = '\0';
+    g_fold_genpath[0] = '\0';
+    g_fold_gen = 0;
+}
+
+/* 0 and g_fold_active: ready for pages. 0 and not active: stale generation,
+ * nothing to write. -1: the fold was not started. */
+int thrt_fold_begin(const char *out_thrt, const char *feed_key,
+                    int is_snapshot, int misp_delta,
+                    uint32_t ttl_days, uint64_t generation) {
+    struct stat sb;
+    feed_gen_t *fg;
+    uint64_t prev_gen;
+    uint64_t new_gen;
+    int n;
+
+    if (out_thrt == NULL || out_thrt[0] == '\0' ||
+        feed_key == NULL || feed_key[0] == '\0')
+        return -1;
+    if (g_fold_active)
+        fold_close_state();
+    builder_state_reset();
+    ioc_dedup_reset();
+    g_ioc_dedup_active = 0;
+    thrt_misp_delta_mode(misp_delta);
+
+    n = snprintf(g_fold_out, sizeof g_fold_out, "%s", out_thrt);
+    if (n < 0 || (size_t)n >= sizeof g_fold_out)
+        goto fail;
+    n = snprintf(g_fold_feed, sizeof g_fold_feed, "%s", feed_key);
+    if (n < 0 || (size_t)n >= sizeof g_fold_feed)
+        goto fail;
+    n = snprintf(g_fold_genpath, sizeof g_fold_genpath, "%s.gen", g_fold_out);
+    if (n < 0 || (size_t)n >= sizeof g_fold_genpath)
+        goto fail;
+    snprintf(g_default_source, sizeof g_default_source, "%s", g_fold_feed);
+
+    if (stat(g_fold_out, &sb) == 0)
+        load_existing_thrt(g_fold_out);
+
+    gen_load(g_fold_genpath);
+    fg = gen_find(g_fold_feed);
+    prev_gen = fg ? fg->generation : 0;
+    if (generation > 0 && fg && generation <= prev_gen) {
+        fprintf(stderr,
+                "%s apply-delta: stale generation %llu <= %llu for feed '%s' - "
+                "skipping (anti-resurrection)\n",
+                ICON_WARN, (unsigned long long)generation,
+                (unsigned long long)prev_gen, g_fold_feed);
+        fold_close_state();
+        return 0;
+    }
+    new_gen = (generation > 0) ? generation : prev_gen + 1;
+
+    if (is_snapshot)
+        feed_snapshot_evict(g_fold_feed);
+
+    if (ttl_days > 0) {
+        time_t now = time(NULL);
+        uint64_t horizon = (uint64_t)now - (uint64_t)ttl_days * 86400ULL;
+        for (size_t i = 0; i < g_gen.count; ) {
+            feed_gen_t *e = &g_gen.items[i];
+            if (strcasecmp(e->feed, g_fold_feed) != 0 && e->updated > 0 &&
+                e->updated < horizon) {
+                char stale[THRT_FEED_NAME_MAX];
+                snprintf(stale, sizeof stale, "%s", e->feed);
+                feed_snapshot_evict(stale);
+                gen_remove(stale);
+            } else {
+                i++;
+            }
+        }
+    }
+
+    /* Reclaim freed string-pool bytes so the reserved offset-0 NUL is
+     * present on every fold. The .thrt size stays the same whether or
+     * not an eviction happened. */
+    compact_str_pool();
+    rebuild_meta_dedup();
+    ioc_dedup_seed();
+    g_ioc_dedup_active = 1;
+    g_fold_gen = new_gen;
+    g_fold_active = 1;
+    return 0;
+
+fail:
+    fold_close_state();
+    return -1;
+}
+
+int thrt_fold_page(const char *seg_path) {
+    const char *bn;
+    const char *ext;
+    int is_stix;
+    int is_misp;
+    int is_json;
+    int is_csv;
+    int rc = 0;
+
+    if (!g_fold_active || seg_path == NULL || seg_path[0] == '\0')
+        return -1;
+    /* Keep the feed key set by thrt_fold_begin. Do not take it from the
+     * page filename. */
+    bn = strrchr(seg_path, '/');
+    bn = bn ? bn + 1 : seg_path;
+    is_stix = (strcasestr(bn, ".stix.json") != NULL) ||
+              (strrchr(bn, '.') && strcasecmp(strrchr(bn, '.'), ".stix") == 0);
+    is_misp = (strcasestr(bn, ".misp.json") != NULL);
+    ext = strrchr(bn, '.');
+    is_json = (ext && strcasecmp(ext, ".json") == 0);
+    is_csv = (ext && strcasecmp(ext, ".csv") == 0);
+    if (is_stix)
+        process_stix_json(seg_path);
+    else if (is_misp || is_json)
+        rc = process_misp_json(seg_path);
+    else if (is_csv)
+        parse_csv_file(seg_path);
+    else {
+        fprintf(stderr, "%s apply-delta: unknown segment format: %s\n",
+                ICON_WARN, bn);
+        return -1;
+    }
+    if (rc != 0)
+        return -1;
+
+    /* Apply withdrawals before the next page. Dedup is rebuilt from the
+     * rows that remain, so a later page may add the same indicator. */
+    if (g_delete_set && g_delete_set->count > 0) {
+        apply_delete_set();
+        delete_set_free();
+        g_ioc_dedup_active = 0;
+        rebuild_meta_dedup();
+        ioc_dedup_seed();
+        g_ioc_dedup_active = 1;
+    }
+    return 0;
+}
+
+int thrt_fold_commit(void) {
+    if (!g_fold_active)
+        return -1;
+    g_ioc_dedup_active = 0;
+    write_thrt(g_fold_out);
+    gen_set(g_fold_feed, g_fold_gen, (uint64_t)time(NULL));
+    gen_save(g_fold_genpath);
+    fold_close_state();
+    return 0;
+}
+
+void thrt_fold_abort(void) {
+    if (!g_fold_active)
+        return;
+    fold_close_state();
+}
+
 static int apply_delta_segment(const char *seg_path, const char *out_thrt,
                                const char *feed_key, int is_snapshot,
                                uint32_t ttl_days, uint64_t generation) {
     char feedbuf[THRT_FEED_NAME_MAX];
-    struct stat sb;
-    char genpath[PATH_MAX + 32];
-    feed_gen_t *fg;
-    uint64_t prev_gen;
-    uint64_t new_gen;
     const char *bn;
-    int is_stix;
-    int is_misp;
-    const char *ext;
-    int is_json;
-    int is_csv;
-    builder_state_reset();
-    ioc_dedup_reset();
-    g_ioc_dedup_active = 0;
 
-    /* Resolve the feed identity: explicit feed_key, else the filename stem. */
     if (feed_key && *feed_key) {
-        snprintf(feedbuf, sizeof(feedbuf), "%s", feed_key);
+        snprintf(feedbuf, sizeof feedbuf, "%s", feed_key);
     } else {
         char *dot;
         bn = strrchr(seg_path, '/');
         bn = bn ? bn + 1 : seg_path;
-        snprintf(feedbuf, sizeof(feedbuf), "%s", bn);
+        snprintf(feedbuf, sizeof feedbuf, "%s", bn);
         dot = strrchr(feedbuf, '.');
-        if (dot) *dot = 0;
+        if (dot)
+            *dot = '\0';
         if (strcasestr(bn, ".stix.json") != NULL ||
             (strrchr(bn, '.') && strcasecmp(strrchr(bn, '.'), ".stix") == 0)) {
             char *suf = strrchr(feedbuf, '.');
@@ -3396,92 +3560,16 @@ static int apply_delta_segment(const char *seg_path, const char *out_thrt,
                 *suf = '\0';
         }
     }
-    snprintf(g_default_source, sizeof(g_default_source), "%s", feedbuf);
-
-    /* Reload the current on-disk DB to fold INTO it. */
-    if (stat(out_thrt, &sb) == 0)
-        load_existing_thrt(out_thrt);
-
-    /* Generation companion file (anti-resurrection). */
-            /* room for ".gen" suffix */
-    snprintf(genpath, sizeof(genpath), "%s.gen", out_thrt);
-    gen_load(genpath);
-    fg = gen_find(feedbuf);
-    prev_gen = fg ? fg->generation : 0;
-    if (generation > 0 && fg && generation <= prev_gen) {
-        fprintf(stderr,
-                "%s apply-delta: stale generation %llu <= %llu for feed '%s' - "
-                "skipping (anti-resurrection)\n",
-                ICON_WARN, (unsigned long long)generation,
-                (unsigned long long)prev_gen, feedbuf);
-        gen_free();
+    if (thrt_fold_begin(out_thrt, feedbuf, is_snapshot, g_misp_delta,
+                        ttl_days, generation) != 0)
+        return 1;
+    if (!g_fold_active)
         return 0;
-    }
-    new_gen = (generation > 0) ? generation : prev_gen + 1;
-
-    /* (1) Snapshot-replace: drop this feed's prior contents before re-adding. */
-    if (is_snapshot)
-        feed_snapshot_evict(feedbuf);
-
-    /* Feed-level TTL: evict feeds not refreshed within ttl_days. */
-    if (ttl_days > 0) {
-        time_t now = time(NULL);
-        uint64_t horizon = (uint64_t)now - (uint64_t)ttl_days * 86400ULL;
-        for (size_t i = 0; i < g_gen.count; ) {
-            feed_gen_t *e = &g_gen.items[i];
-            if (strcasecmp(e->feed, feedbuf) != 0 && e->updated > 0 && e->updated < horizon) {
-                char stale[THRT_FEED_NAME_MAX];
-                snprintf(stale, sizeof(stale), "%s", e->feed);
-                feed_snapshot_evict(stale);
-                gen_remove(stale);          /* swap-remove -> re-check same i */
-            } else {
-                i++;
-            }
-        }
-    }
-
-    /* Reclaim freed string-pool bytes UNCONDITIONALLY so the reserved offset-0
-     * NUL is present on every fold - this makes the .thrt size deterministic
-     * (byte-idempotent) whether or not an eviction happened this fold. */
-    compact_str_pool();
-
-    /* Seed dedup tables from survivors, then fold the segment with dedup ON. */
-    rebuild_meta_dedup();
-    ioc_dedup_seed();
-    g_ioc_dedup_active = 1;
-
-    bn = strrchr(seg_path, '/');
-    bn = bn ? bn + 1 : seg_path;
-    is_stix = (strcasestr(bn, ".stix.json") != NULL) ||
-                  (strrchr(bn, '.') && strcasecmp(strrchr(bn, '.'), ".stix") == 0);
-    is_misp = (strcasestr(bn, ".misp.json") != NULL);
-    ext = strrchr(bn, '.');
-    is_json = (ext && strcasecmp(ext, ".json") == 0);
-    is_csv = (ext && strcasecmp(ext, ".csv")  == 0);
-    if (is_stix) {
-        process_stix_json(seg_path);
-    } else if (is_misp || is_json) {
-        process_misp_json(seg_path);
-    } else if (is_csv) {
-        parse_csv_file(seg_path);          /* honours +/- rows incl. deletes */
-    } else {
-        fprintf(stderr, "%s apply-delta: unknown segment format: %s\n", ICON_WARN, bn);
-        g_ioc_dedup_active = 0;
-        ioc_dedup_reset();
-        gen_free();
+    if (thrt_fold_page(seg_path) != 0) {
+        thrt_fold_abort();
         return 1;
     }
-
-    g_ioc_dedup_active = 0;
-    write_thrt(out_thrt);                  /* applies deletes, sorts, atomic rename */
-
-    /* Persist the advanced generation cursor for this feed. */
-    gen_set(feedbuf, new_gen, (uint64_t)time(NULL));
-    gen_save(genpath);
-
-    ioc_dedup_reset();
-    gen_free();
-    return 0;
+    return thrt_fold_commit() != 0 ? 1 : 0;
 }
 
 /* ============================================================================

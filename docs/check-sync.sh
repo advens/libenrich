@@ -157,6 +157,9 @@ printf '%s\n' "$out" | grep -q CTI
 grep -q '^180$' "$tmp/live.misp.json.cursor"
 grep -q "sync-sample" "$tmp/live.misp.json"
 grep -q "203.0.113.203" "$tmp/live.misp.json"
+# Three pages, one generation.
+gen=$(awk -F '\t' '$1 == "live.misp" { print $2 }' "$tmp/live.thrt.gen")
+test "$gen" = 1
 
 # A different feed key survives a full pull. The MISP feed key does not.
 printf '%s\n' 'action,type,indicator,confidence,category,tlp' \
