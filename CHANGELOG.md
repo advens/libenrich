@@ -10,7 +10,7 @@ The frozen surfaces are the C ABI and the on-disk `.thrt`, `.ovly`, and
 
 ## [Unreleased]
 
-## [1.0.1] - 2026-11-19
+## [1.0.3] - 2026-11-19
 
 PATCH: the overlay header compiles under strict C11. The C ABI, the
 SONAME (`libenrich.so.1`), and the on-disk formats are unchanged.
@@ -20,6 +20,17 @@ SONAME (`libenrich.so.1`), and the on-disk formats are unchanged.
 - `thrt_overlay.h` used `O_CLOEXEC`, which glibc hides under plain
   `-std=c11`, so a consumer that includes `enrich.h` without asking for
   POSIX failed to compile. It now opens without the flag in that case.
+
+## [1.0.2] - 2026-11-19
+
+The 1.0.2 tag was pushed before its version bump merged. Its tarball
+has the strict C11 fix, but its files still say 1.0.1
+(`libenrich.so.1.0.1`, `enrich_version()`). Use 1.0.3.
+
+## [1.0.1] - 2026-11-19
+
+The 1.0.1 tag points at the 1.0.0 tree: it was pushed before the fix
+merged, and release tags are not moved. Its tarball is 1.0.0. Use 1.0.3.
 
 ## [1.0.0] - 2026-11-19
 
@@ -168,7 +179,9 @@ PATCH: each MISP page is folded and released. The C ABI, the SONAME
 - `enrich` builds a `.thrt` from a JSON config and can fetch GeoIP,
   MISP, and plain files. It does not distribute files to edges.
 
-[Unreleased]: https://github.com/advens/libenrich/compare/1.0.1...HEAD
+[Unreleased]: https://github.com/advens/libenrich/compare/1.0.3...HEAD
+[1.0.3]: https://github.com/advens/libenrich/releases/tag/1.0.3
+[1.0.2]: https://github.com/advens/libenrich/releases/tag/1.0.2
 [1.0.1]: https://github.com/advens/libenrich/releases/tag/1.0.1
 [1.0.0]: https://github.com/advens/libenrich/releases/tag/1.0.0
 [0.1.7]: https://github.com/advens/libenrich/releases/tag/0.1.7
