@@ -189,15 +189,66 @@ static void mkdir_parent(const char *path)
     mkdir(buf, 0755);
 }
 
+/* Clear a buffer that held a credential; the volatile store is not
+ * optimized away. */
+static void explicit_wipe(void *p, size_t n)
+{
+    volatile unsigned char *v = (volatile unsigned char *)p;
+    while (n--)
+        *v++ = 0;
+}
+
+/* Append `name = "value"` to a curl config. The value is quoted and its
+ * quote and backslash escaped; a line break would end the option, so it is
+ * refused. */
+static int curl_cfg_add(char *buf, size_t cap, size_t *used, const char *name, const char *value)
+{
+    size_t u = *used;
+    int nw = snprintf(buf + u, cap - u, "%s = \"", name);
+    if (nw < 0 || (size_t)nw >= cap - u)
+        return -1;
+    u += (size_t)nw;
+    for (const char *c = value; *c; c++) {
+        if (*c == '\n' || *c == '\r')
+            return -1;
+        if (u + 3 >= cap)
+            return -1;
+        if (*c == '"' || *c == '\\')
+            buf[u++] = '\\';
+        buf[u++] = *c;
+    }
+    if (u + 3 >= cap)
+        return -1;
+    buf[u++] = '"';
+    buf[u++] = '\n';
+    buf[u] = '\0';
+    *used = u;
+    return 0;
+}
+
+/* curl writes to dest. user is user:pass for Basic auth, or NULL. hdr is
+ * an extra header, or NULL. body is a POST body, or NULL. Credentials go to
+ * curl as a config on its standard input (-K -): an argument is visible to
+ * every local user in the process list. */
 static int curl_to_file(const char *url, const char *user, const char *hdr,
                         const char *body, const char *dest)
 {
     char tmp[1024];
+    char cfg[2048];
+    size_t cfg_len = 0;
     pid_t pid;
     int status;
+    int fds[2];
     char *argv[20];
     int n = 0;
+    struct sigaction ign, old;
 
+    cfg[0] = '\0';
+    if ((user != NULL && user[0] != '\0' && curl_cfg_add(cfg, sizeof cfg, &cfg_len, "user", user) != 0) ||
+        (hdr != NULL && curl_cfg_add(cfg, sizeof cfg, &cfg_len, "header", hdr) != 0)) {
+        fprintf(stderr, "enrich: credential does not fit a curl option\n");
+        return -1;
+    }
     mkdir_parent(dest);
     snprintf(tmp, sizeof tmp, "%s.tmp", dest);
     argv[n++] = "curl";
@@ -205,14 +256,8 @@ static int curl_to_file(const char *url, const char *user, const char *hdr,
     argv[n++] = "-L";
     argv[n++] = "--max-time";
     argv[n++] = "120";
-    if (user != NULL && user[0] != '\0') {
-        argv[n++] = "-u";
-        argv[n++] = (char *)user;
-    }
-    if (hdr != NULL) {
-        argv[n++] = "-H";
-        argv[n++] = (char *)hdr;
-    }
+    argv[n++] = "-K";
+    argv[n++] = "-";
     if (body != NULL) {
         argv[n++] = "-H";
         argv[n++] = "Accept: application/json";
@@ -226,13 +271,39 @@ static int curl_to_file(const char *url, const char *user, const char *hdr,
     argv[n++] = (char *)url;
     argv[n] = NULL;
 
-    pid = fork();
-    if (pid < 0)
+    if (pipe(fds) != 0)
         return -1;
+    pid = fork();
+    if (pid < 0) {
+        close(fds[0]);
+        close(fds[1]);
+        return -1;
+    }
     if (pid == 0) {
+        close(fds[1]);
+        if (dup2(fds[0], STDIN_FILENO) < 0)
+            _exit(127);
+        close(fds[0]);
         execvp("curl", argv);
         _exit(127);
     }
+    close(fds[0]);
+    /* A curl that exits before reading its config must not kill enrich. */
+    memset(&ign, 0, sizeof ign);
+    ign.sa_handler = SIG_IGN;
+    sigemptyset(&ign.sa_mask);
+    sigaction(SIGPIPE, &ign, &old);
+    for (size_t off = 0; off < cfg_len;) {
+        ssize_t w = write(fds[1], cfg + off, cfg_len - off);
+        if (w < 0 && errno == EINTR)
+            continue;
+        if (w <= 0)
+            break;
+        off += (size_t)w;
+    }
+    close(fds[1]);
+    sigaction(SIGPIPE, &old, NULL);
+    explicit_wipe(cfg, sizeof cfg);
     if (waitpid(pid, &status, 0) < 0 || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
         unlink(tmp);
         return -1;

@@ -108,6 +108,13 @@ static void answer(int client)
 
     header_end = strstr(req, "\r\n\r\n");
     body = header_end != NULL ? header_end + 4 : req;
+    /* MISP refuses a request without the automation key. */
+    if (strstr(req, "\r\nAuthorization: test-key\r\n") == NULL) {
+        const char *deny =
+            "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        (void)write(client, deny, strlen(deny));
+        return;
+    }
     if (last_is_timestamp(body)) {
         rows = delta_rows;
         count = (int)(sizeof delta_rows / sizeof delta_rows[0]);
