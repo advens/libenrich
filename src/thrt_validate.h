@@ -25,9 +25,9 @@
 #define THRT_VALID_EVERSION 2
 #define THRT_VALID_ECHECKSUM 3
 
-static inline void thrt_valid_err(char *err, size_t len, const char *fmt, ...) __attribute__((format(printf, 3, 4)));
+static void thrt_valid_err(char *err, size_t len, const char *fmt, ...) __attribute__((unused, format(printf, 3, 4)));
 
-static inline void thrt_valid_err(char *err, size_t len, const char *fmt, ...) {
+static void thrt_valid_err(char *err, size_t len, const char *fmt, ...) {
     va_list ap;
     if (err == NULL || len == 0) return;
     va_start(ap, fmt);
@@ -41,7 +41,7 @@ static inline int thrt_region_ok(uint64_t off, uint64_t count, uint64_t elem, si
     return count <= ((uint64_t)size - off) / elem;
 }
 
-static inline int thrt_validate(const unsigned char *base, size_t size, const char *path, char *err, size_t err_len) {
+static __attribute__((unused)) int thrt_validate(const unsigned char *base, size_t size, const char *path, char *err, size_t err_len) {
     const thrt_header_t *h = (const thrt_header_t *)(const void *)base;
     const thrt_metadata_t *md;
     const thrt_ipv4_range_t *v4;

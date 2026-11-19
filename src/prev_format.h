@@ -79,7 +79,7 @@ _Static_assert(sizeof(prev_entry_t) == 16, "prev_entry_t must be 16 bytes");
  * table uses c = 1, d = 3 (SipHash-1-3); SipHash-2-4 is the published
  * reference the tests check this code against. Bytes are read one at a time,
  * so the input needs no alignment and the result is the same on any host. */
-static inline uint64_t prev_siphash(uint64_t k0, uint64_t k1, const void* data, size_t len, int c, int d) {
+static __attribute__((unused)) uint64_t prev_siphash(uint64_t k0, uint64_t k1, const void* data, size_t len, int c, int d) {
     const uint8_t* p = (const uint8_t*)data;
     uint64_t v0 = 0x736f6d6570736575ULL ^ k0;
     uint64_t v1 = 0x646f72616e646f6dULL ^ k1;
