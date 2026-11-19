@@ -48,6 +48,14 @@
 
 #include "thrt_logic.h" /* for crc32c_platform(), thrt_hash() */
 
+/* glibc hides O_CLOEXEC under plain -std=c11. A consumer that does not ask
+ * for POSIX still compiles; it then opens without the flag. */
+#ifndef O_CLOEXEC
+    #define THRT_O_CLOEXEC 0
+#else
+    #define THRT_O_CLOEXEC O_CLOEXEC
+#endif
+
 /* ============================================================================
  * CONSTANTS
  * ============================================================================ */
@@ -166,7 +174,7 @@ static __attribute__((unused)) thrt_overlay_t* thrt_overlay_load_ex(const char* 
     if (why) *why = THRT_OVERLAY_ERR_IO;
     if (!path || !*path) return NULL;
 
-    fd = open(path, O_RDONLY | O_CLOEXEC);
+    fd = open(path, O_RDONLY | THRT_O_CLOEXEC);
     if (fd < 0) return NULL;
     if (fstat(fd, &sb) != 0 || !S_ISREG(sb.st_mode)) {
         close(fd);
