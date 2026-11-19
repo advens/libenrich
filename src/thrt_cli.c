@@ -1,9 +1,8 @@
 /* thrt_cli.c
- * Standalone command-line tool to query and inspect a CTI database
- * (.thrt) and perform maintenance operations on it.
+ * `enrich lookup`: look one indicator up in a .thrt through the library
+ * lookup API, so the command prints what an enricher would emit.
  *
- * Usage:   ./thrt_cli <db_file> <ip_or_domain>
- * Compile: cc -O3 thrt_cli.c -o thrt_cli
+ * Usage:   enrich lookup <indicator>  (thrt_cli_main <db_file> <indicator>)
  *
  * Copyright 2026 Advens.
  *
@@ -26,16 +25,8 @@
 
 #include <stdio.h>
 #include <stdlib.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <inttypes.h>
-#include "thrt_format.h"
-#include "thrt_logic.h"
+#include <string.h>
+#include "enrich.h"
 
 /* --- Colors & Icons --- */
 #define COL_RESET   "\033[0m"
@@ -52,9 +43,6 @@
 #define ICON_FAIL   "[FAIL]"
 #define ICON_DB     "[DB]"
 
-/* --- V4 Feed Table --- */
-static thrt_feed_entry_t *g_feeds = NULL;
-static uint32_t g_feed_count = 0;
 
 /* --- Category Mask Decoder --- */
 typedef struct { uint16_t flag; const char *name; const char *color; } cat_entry_t;
@@ -85,13 +73,15 @@ static void print_categories(uint16_t mask) {
     printf(" (0x%04x)", mask);
 }
 
-static void print_feeds(uint64_t mask) {
+static void print_feeds(const enrich_snap_t *s, uint64_t mask) {
     int first = 1;
-    for (uint32_t i = 0; i < g_feed_count && i < 64; i++) {
-        if (mask & (1ULL << i)) {
-            printf("%s%s", first ? "" : ", ", g_feeds[i].name);
-            first = 0;
-        }
+    for (unsigned i = 0; i < 64; i++) {
+        const char *name;
+        if (!(mask & (1ULL << i))) continue;
+        name = enrich_feed_name(s, i);
+        if (name == NULL) continue;
+        printf("%s%s", first ? "" : ", ", name);
+        first = 0;
     }
     if (first) printf("(none)");
 }
@@ -114,122 +104,69 @@ static void print_type(uint8_t mask) {
 }
 
 int main(int argc, char **argv) {
-    const char *path;
+    enrich_options_t opt;
+    enrich_t *e = NULL;
+    enrich_reader_t *r;
+    const enrich_snap_t *snap;
+    enrich_result_t res;
+    enrich_info_t info;
+    char err[512];
     const char *key;
-    int fd;
-    struct stat sb;
-    void *map;
-    thrt_header_t *hdr;
-    thrt_metadata_t *meta_base;
-    thrt_ipv4_range_t *ip_table;
-    thrt_ipv6_range_t *ip6_table;
-    thrt_hash_entry_t *hash_table;
-    char *str_pool;
-    const void *ip_accel;
-    uint8_t *bloom_base;
-    thrt_metadata_t *res;
-    struct in_addr addr;
-    struct in6_addr addr6;
+    int rc;
+    static const char *kinds[] = {"String", "IPv4", "IPv6"};
+
     if (argc < 3) {
         printf("Usage: %s <feed.thrt> <ioc_to_check>\n", argv[0]);
         return 1;
     }
-
-    path = argv[1];
     key = argv[2];
 
-    fd = open(path, O_RDONLY);
-    if (fd < 0) { perror("open"); return 1; }
-
-    fstat(fd, &sb);
-    map = mmap(NULL, sb.st_size, PROT_READ, MAP_SHARED, fd, 0);
-    if (map == MAP_FAILED) { perror("mmap"); return 1; }
-
-    hdr = (thrt_header_t*)map;
-    if (hdr->magic != THRT_MAGIC) { printf("Invalid Magic\n"); return 1; }
-    if (hdr->version < THRT_VERSION) {
-        printf("%s Database is v%d - v%d required. Rebuild with thrtutil.\n",
-               ICON_FAIL, hdr->version, THRT_VERSION);
+    memset(&opt, 0, sizeof opt);
+    opt.size = sizeof opt;
+    opt.thrt_path = argv[1];
+    rc = enrich_open(&e, &opt, err, sizeof err);
+    if (rc != ENRICH_OK) {
+        printf("%s %s\n", ICON_FAIL, err[0] ? err : enrich_strerror(rc));
         return 1;
     }
-
-    printf("%s %sDB Loaded:%s %s (v%d)\n", ICON_DB, COL_BOLD, COL_RESET, path, hdr->version);
-
-    // Base Pointers
-    meta_base = (thrt_metadata_t*)((char*)map + hdr->offset_metadata);
-    ip_table = (thrt_ipv4_range_t*)((char*)map + hdr->offset_ipv4);
-    ip6_table = (thrt_ipv6_range_t*)((char*)map + hdr->offset_ipv6);
-    hash_table = (thrt_hash_entry_t*)((char*)map + hdr->offset_hashtable);
-    str_pool = (char*)map + hdr->offset_strings;
-
-    // V2 Pointers
-    ip_accel = NULL;
-    bloom_base = NULL;
-    if (hdr->version >= 2) {
-        ip_accel = (const char*)map + hdr->offset_ip_accel;
-        bloom_base = (uint8_t*)((char*)map + hdr->offset_bloom);
+    r = enrich_reader_new(e);
+    if (r == NULL) {
+        printf("%s out of memory\n", ICON_FAIL);
+        enrich_close(e);
+        return 1;
     }
-
-    // Load V4 Feed Table
-    if (hdr->version >= 4 && hdr->feed_count > 0 && hdr->offset_feeds > 0) {
-        g_feeds = (thrt_feed_entry_t*)((char*)map + hdr->offset_feeds);
-        g_feed_count = hdr->feed_count;
-        printf("   Feeds Available: %u\n", g_feed_count);
-    }
-
-    // Logic
-    res = NULL;
+    snap = enrich_reader_enter(r);
+    enrich_snap_info(snap, &info);
+    printf("%s %sDB Loaded:%s %s (v%u)\n", ICON_DB, COL_BOLD, COL_RESET, argv[1], info.thrt_version);
+    if (info.thrt_feeds > 0) printf("   Feeds Available: %u\n", info.thrt_feeds);
 
     printf("\nChecking: %s%s%s\n", COL_CYAN, key, COL_RESET);
-
-    if (inet_pton(AF_INET, key, &addr)) {
-        uint32_t ip;
-        printf("[*] Type: IPv4\n");
-        ip = ntohl(addr.s_addr);
-
-        if (ip_accel) {
-            printf("[*] Using Acceleration Table\n");
-            res = thrt_lookup_ip_accel(ip_table, ip_accel, meta_base, ip);
-        } else {
-            res = thrt_lookup_ip(ip_table, hdr->ipv4_range_count, meta_base, ip);
-        }
-
-    } else if (inet_pton(AF_INET6, key, &addr6)) {
-        printf("[*] Type: IPv6\n");
-        // Test Fast Parser logic implicitly via lookup
-        res = thrt_lookup_ipv6(ip6_table, hdr->ipv6_range_count, meta_base, addr6.s6_addr);
-
-    } else {
-        uint64_t hash;
-        printf("[*] Type: String\n");
-        hash = thrt_hash(key);
-        //printf("[*] Hash: %" PRIx64 "\n", hash);
-
-        if (bloom_base) {
-            if (!thrt_bloom_check(bloom_base, hdr->bloom_size_bits, hash)) {
-                printf("%s Bloom Filter: REJECTED%s\n", COL_RED, COL_RESET);
-            } else {
-                printf("%s Bloom Filter: PASSED%s\n", COL_GREEN, COL_RESET);
-            }
-        }
-
-        res = thrt_lookup_string(hash_table, hdr->hash_slots, str_pool, meta_base, key);
+    rc = enrich_lookup(snap, 0, key, strlen(key), &res);
+    if (rc < 0) {
+        printf("%s %s\n", ICON_FAIL, enrich_strerror(rc));
+        enrich_reader_free(r);
+        enrich_close(e);
+        return 1;
     }
+    printf("[*] Type: %s\n", kinds[res.kind <= ENRICH_KIND_IPV6 ? res.kind : 0]);
 
-    if (res) {
+    if (res.flags & ENRICH_R_THRT) {
         printf("\n%s>>> MATCH FOUND! <<<%s\n", ICON_WARN, COL_RESET);
-        printf("   Confidence : %d%%\n", res->confidence);
-        printf("   Type       : "); print_type(res->type_mask); printf("\n");
-        printf("   TLP        : "); print_tlp(res->tlp_mask); printf("\n");
-        printf("   Categories : "); print_categories(res->category_mask); printf("\n");
-        printf("   Feeds      : "); print_feeds(res->feed_mask); printf("\n");
-
-        if (res->tags_offset && res->tags_length && str_pool) {
-            printf("   Tags       : %.*s\n", res->tags_length, str_pool + res->tags_offset);
+        if (res.type_mask & THRT_TYPE_CTI) printf("   Confidence : %d%%\n", res.confidence);
+        if (res.type_mask & THRT_TYPE_CTI_R) printf("   Restricted : confidence %d%%\n", res.confidence_r);
+        printf("   Type       : "); print_type(res.type_mask); printf("\n");
+        if (res.type_mask & THRT_TYPE_CTI) {
+            printf("   TLP        : "); print_tlp(res.tlp_mask); printf("\n");
+            printf("   Categories : "); print_categories(res.category_mask); printf("\n");
+            printf("   Feeds      : "); print_feeds(snap, res.feed_mask); printf("\n");
         }
+        if (res.labels != NULL) printf("   Labels     : %.*s\n", (int)res.labels_len, res.labels);
+        if (res.tags != NULL) printf("   Tags       : %.*s\n", (int)res.tags_len, res.tags);
     } else {
         printf("\n%s NO MATCH.\n", ICON_OK);
     }
 
+    enrich_reader_free(r);
+    enrich_close(e);
     return 0;
 }

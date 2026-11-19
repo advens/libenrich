@@ -233,6 +233,19 @@ static inline bool thrt_parse_ipv6_fast(const char* src, size_t len, uint8_t* ds
     #define PREFETCH(addr) ((void)0)
 #endif
 
+/* Second bloom hash. thrt_hash() fills only the low 32 bits, so the probe
+ * step is derived from them with the murmur3 finalizer, and is odd so the
+ * three probes are distinct bits. The builder uses the same function. */
+static inline uint32_t thrt_bloom_h2(uint32_t h1) {
+    uint32_t h = h1;
+    h ^= h >> 16;
+    h *= 0x85ebca6bu;
+    h ^= h >> 13;
+    h *= 0xc2b2ae35u;
+    h ^= h >> 16;
+    return h | 1u;
+}
+
 /* Standard bloom check - optimized for early exit */
 static inline bool thrt_bloom_check(const uint8_t* bloom, uint32_t total_bits, uint64_t hash) {
     uint32_t h1;
@@ -243,7 +256,7 @@ static inline bool thrt_bloom_check(const uint8_t* bloom, uint32_t total_bits, u
     if (!bloom || !total_bits) return true;  // Fail open
 
     h1 = (uint32_t)hash;
-    h2 = (uint32_t)((hash >> 32) | (hash << 32));
+    h2 = thrt_bloom_h2(h1);
 
     // Check bit 0
     idx0 = h1 % total_bits;
@@ -276,7 +289,7 @@ static inline void thrt_bloom_check_batch(
     for (int i = 0; i < count; i++) {
         uint64_t hash = hashes[i];
         uint32_t h1 = (uint32_t)hash;
-        uint32_t h2 = (uint32_t)((hash >> 32) | (hash << 32));
+        uint32_t h2 = thrt_bloom_h2(h1);
         uint32_t idx0;
         uint32_t idx1;
         uint32_t idx2;
@@ -327,7 +340,7 @@ static inline bool thrt_bloom_check_fast(const uint8_t* bloom, uint32_t total_bi
 
     mask = total_bits - 1;
     h1 = (uint32_t)hash;
-    h2 = (uint32_t)(hash >> 32);
+    h2 = thrt_bloom_h2(h1);
 
     // Fast modulo using bitwise AND
     idx0 = h1 & mask;

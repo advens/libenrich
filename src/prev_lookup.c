@@ -74,7 +74,7 @@ int main(int argc, char **argv) {
         return 1;
     }
     h = (const prev_header_t *)map;
-    count = prev_lookup(table, slots, argv[2], &edges, &srcs);
+    count = prev_lookup(h, table, slots, argv[2], &edges, &srcs);
     printf("db %s  v%u  slots=%u  entries=%u  epoch=%u\n", argv[1], h->version, slots, h->entry_count, h->epoch);
     printf("key=%s  count=%u  collectors=%u  sources=%u%s\n", argv[2], count, edges, srcs,
            count == 0 ? "  (absent = rare)" : "");

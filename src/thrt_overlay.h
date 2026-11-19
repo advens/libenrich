@@ -3,11 +3,17 @@
  * A small binary file loaded alongside the main .thrt database and checked
  * before the normal CTI lookup on the hot path.
  *
- * Layout:
+ * Layout (version 2):
  *   [thrt_overlay_header_t]     32 bytes
- *   [thrt_overlay_entry_t * N]  32 bytes each
- *   [string pool]               variable (tags JSON)
+ *   [thrt_overlay_entry_t * N]  40 bytes each
+ *   [string pool]               NUL at offset 0, then NUL-terminated
+ *                               indicator values and tags JSON arrays
  *   [uint32_t CRC32C]           4-byte trailer
+ *
+ * Version 1 stored only the 32-bit CRC32C of each indicator and matched on
+ * it, so an unrelated value with the same CRC hit the entry, by chance or by
+ * construction. Version 2 stores the value and a lookup compares it.
+ * Version 1 files are refused.
  *
  * Copyright 2026 Advens.
  *
@@ -47,7 +53,8 @@
  * ============================================================================ */
 
 #define THRT_OVERLAY_MAGIC 0x4F564C59 /* "OVLY" */
-#define THRT_OVERLAY_VERSION 1
+#define THRT_OVERLAY_VERSION 2
+#define THRT_OVERLAY_ENTRIES_MAX (1u << 24)
 
 #define OVERLAY_ACTION_ADD '+'
 #define OVERLAY_ACTION_WHITELIST '-'
@@ -55,6 +62,14 @@
 
 #define OVERLAY_SUPPRESS_SCORE_ONLY 0
 #define OVERLAY_SUPPRESS_FULL 1
+
+/* thrt_overlay_load_ex() reasons. */
+#define THRT_OVERLAY_OK 0
+#define THRT_OVERLAY_ERR_IO 1       /* open, fstat or mmap failed */
+#define THRT_OVERLAY_ERR_FORMAT 2   /* magic, size or an entry is out of bounds */
+#define THRT_OVERLAY_ERR_VERSION 3  /* not version 2 */
+#define THRT_OVERLAY_ERR_CHECKSUM 4 /* trailing CRC32C mismatch */
+#define THRT_OVERLAY_ERR_NOMEM 5
 
 /* ============================================================================
  * BINARY FORMAT STRUCTURES
@@ -73,19 +88,21 @@ typedef struct {
 _Static_assert(sizeof(thrt_overlay_header_t) == 32, "header must be 32 bytes");
 
 typedef struct {
-    uint64_t ioc_hash; /* CRC32C hash of IOC value string (same as thrt_hash()) */
-    uint8_t action; /* '+' = add, '-' = whitelist */
+    uint64_t ioc_hash; /* thrt_hash() of the value, checked at load */
+    uint32_t value_offset; /* Offset of the NUL-terminated value in the string pool */
+    uint32_t value_length; /* Value length, without the NUL */
+    uint8_t action; /* '+' add, '-' whitelist, 'T' tag */
     uint8_t suppress_mode; /* 0 = soft (flag, keep enrichment), 1 = full_suppress (whitelist only) */
     uint8_t confidence; /* 0-100 confidence level */
     uint8_t type_mask; /* THRT_TYPE_* flags */
     uint16_t category_mask; /* THRT_CAT_* flags */
-    uint16_t pad; /* Alignment padding */
-    uint64_t feed_mask; /* Which feeds contributed */
-    uint32_t tags_offset; /* Offset into string pool (0 = none) */
-    uint32_t tags_length; /* Length of tags JSON in string pool */
+    uint16_t pad; /* Zero */
+    uint32_t tags_offset; /* Offset of a JSON array in the string pool (0 = none) */
+    uint32_t tags_length; /* Its length, without the NUL */
+    uint64_t feed_mask; /* Reserved, zero */
 } thrt_overlay_entry_t;
 
-_Static_assert(sizeof(thrt_overlay_entry_t) == 32, "entry must be 32 bytes");
+_Static_assert(sizeof(thrt_overlay_entry_t) == 40, "entry must be 40 bytes");
 
 /* ============================================================================
  * LOADED OVERLAY (in-memory, with hash index for O(1) lookup)
@@ -96,9 +113,10 @@ _Static_assert(sizeof(thrt_overlay_entry_t) == 32, "entry must be 32 bytes");
 typedef struct {
     void* map_base; /* mmap base pointer */
     size_t map_size; /* mmap region size */
-    thrt_overlay_header_t* header; /* Points into map_base */
-    thrt_overlay_entry_t* entries; /* Points into map_base (after header) */
-    char* string_pool; /* Points into map_base (after entries) */
+    const thrt_overlay_header_t* header; /* Points into map_base */
+    const thrt_overlay_entry_t* entries; /* Points into map_base (after header) */
+    const char* string_pool; /* Points into map_base (after entries) */
+    size_t pool_size; /* Bytes in the string pool */
 
     /* Hash index for O(1) lookup - open addressing, linear probing */
     uint32_t idx_capacity; /* Power of 2, >= entry_count * 2 */
@@ -109,7 +127,7 @@ typedef struct {
  * IMPLEMENTATION
  * ============================================================================ */
 
-/* Round up to next power of 2 (minimum 4) */
+/* Round up to next power of 2 (minimum 4). v <= 2^31. */
 static inline uint32_t overlay_next_pow2(uint32_t v) {
     if (v < 4) return 4;
     v--;
@@ -121,131 +139,142 @@ static inline uint32_t overlay_next_pow2(uint32_t v) {
     return v + 1;
 }
 
-/* Load overlay from file. Returns NULL on failure (not an error - overlay is optional).
- *
- * Steps:
- *   1. open + fstat + mmap(MAP_PRIVATE, PROT_READ)
- *   2. Validate magic, version, minimum size
- *   3. Verify trailing CRC32C (same pattern as the .thrt database)
- *   4. Set up pointers: header, entries, string_pool
- *   5. Build hash index: power-of-2 capacity >= entry_count * 2, linear probing
- *   6. Return allocated thrt_overlay_t
- */
-static __attribute__((unused)) thrt_overlay_t* thrt_overlay_load(const char* path) {
+/* A [off, off + len] string with its NUL fits the pool. */
+static inline bool overlay_str_ok(const char* pool, size_t pool_size, uint32_t off, uint32_t len) {
+    if ((size_t)off >= pool_size) return false;
+    if ((size_t)len >= pool_size - (size_t)off) return false;
+    return pool[(size_t)off + len] == '\0' && memchr(pool + off, '\0', len) == NULL;
+}
+
+/* Load and validate an overlay. Returns NULL and sets *why (optional) on
+ * failure. Every entry is checked before the overlay is returned: its value
+ * and tags lie inside the pool, are NUL-terminated, and the stored hash is
+ * the hash of the stored value. A lookup then trusts the file. */
+static __attribute__((unused)) thrt_overlay_t* thrt_overlay_load_ex(const char* path, int* why) {
+    int fd;
+    struct stat sb;
+    size_t file_size, entries_size, data_len, pool_off;
+    void* map;
+    const thrt_overlay_header_t* hdr;
+    const thrt_overlay_entry_t* ents;
+    const char* pool;
+    size_t pool_size;
+    uint32_t stored_crc, computed_crc, mask;
+    thrt_overlay_t* ovl;
+    int err = THRT_OVERLAY_ERR_FORMAT;
+
+    if (why) *why = THRT_OVERLAY_ERR_IO;
     if (!path || !*path) return NULL;
 
-    int fd = open(path, O_RDONLY);
+    fd = open(path, O_RDONLY | O_CLOEXEC);
     if (fd < 0) return NULL;
-
-    struct stat sb;
-    if (fstat(fd, &sb) != 0 || sb.st_size == 0) {
+    if (fstat(fd, &sb) != 0 || !S_ISREG(sb.st_mode)) {
         close(fd);
         return NULL;
     }
-
-    size_t file_size = (size_t)sb.st_size;
-
-    /* Minimum: header + CRC32C trailer */
-    if (file_size < sizeof(thrt_overlay_header_t) + sizeof(uint32_t)) {
+    file_size = (size_t)sb.st_size;
+    if (file_size < sizeof(thrt_overlay_header_t) + 1 + sizeof(uint32_t)) {
         close(fd);
+        if (why) *why = THRT_OVERLAY_ERR_FORMAT;
         return NULL;
     }
-
-    void* map = mmap(NULL, file_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    map = mmap(NULL, file_size, PROT_READ, MAP_PRIVATE, fd, 0);
     close(fd);
-
     if (map == MAP_FAILED) return NULL;
 
-    /* Validate header */
-    thrt_overlay_header_t* hdr = (thrt_overlay_header_t*)map;
-    if (hdr->magic != THRT_OVERLAY_MAGIC) {
-        munmap(map, file_size);
-        return NULL;
-    }
+    hdr = (const thrt_overlay_header_t*)map;
+    if (hdr->magic != THRT_OVERLAY_MAGIC) goto fail;
     if (hdr->version != THRT_OVERLAY_VERSION) {
-        munmap(map, file_size);
-        return NULL;
+        err = THRT_OVERLAY_ERR_VERSION;
+        goto fail;
     }
+    if (hdr->entry_count > THRT_OVERLAY_ENTRIES_MAX) goto fail;
 
-    /* Validate file size: header + entries + CRC trailer (string pool is variable) */
-    size_t entries_size = (size_t)hdr->entry_count * sizeof(thrt_overlay_entry_t);
-    size_t min_size = sizeof(thrt_overlay_header_t) + entries_size + sizeof(uint32_t);
-    if (file_size < min_size) {
-        munmap(map, file_size);
-        return NULL;
-    }
+    /* header + entries + at least the pool's leading NUL + CRC trailer */
+    entries_size = (size_t)hdr->entry_count * sizeof(thrt_overlay_entry_t);
+    if (file_size - sizeof(thrt_overlay_header_t) - sizeof(uint32_t) < entries_size + 1) goto fail;
 
-    /* Verify trailing CRC32C */
-    size_t data_len = file_size - sizeof(uint32_t);
-    uint32_t stored_crc;
-    memcpy(&stored_crc, (uint8_t*)map + data_len, sizeof(uint32_t));
-    uint32_t computed_crc = crc32c_platform(0xFFFFFFFF, map, data_len) ^ 0xFFFFFFFF;
-
+    data_len = file_size - sizeof(uint32_t);
+    memcpy(&stored_crc, (const uint8_t*)map + data_len, sizeof(uint32_t));
+    computed_crc = crc32c_platform(0xFFFFFFFF, map, data_len) ^ 0xFFFFFFFF;
     if (computed_crc != stored_crc) {
-        munmap(map, file_size);
-        return NULL;
+        err = THRT_OVERLAY_ERR_CHECKSUM;
+        goto fail;
     }
 
-    /* Set up pointers into the mmap'd region */
-    thrt_overlay_entry_t* entries_ptr = (thrt_overlay_entry_t*)(void*)((uint8_t*)map + sizeof(thrt_overlay_header_t));
+    ents = (const thrt_overlay_entry_t*)(const void*)((const uint8_t*)map + sizeof(thrt_overlay_header_t));
+    pool_off = sizeof(thrt_overlay_header_t) + entries_size;
+    pool = (const char*)map + pool_off;
+    pool_size = data_len - pool_off;
+    if (pool[0] != '\0') goto fail;
 
-    char* pool_ptr = (char*)((uint8_t*)map + sizeof(thrt_overlay_header_t) + entries_size);
+    for (uint32_t i = 0; i < hdr->entry_count; i++) {
+        const thrt_overlay_entry_t* e = &ents[i];
+        if (e->action != OVERLAY_ACTION_ADD && e->action != OVERLAY_ACTION_WHITELIST && e->action != OVERLAY_ACTION_TAG)
+            goto fail;
+        if (e->value_length == 0 || !overlay_str_ok(pool, pool_size, e->value_offset, e->value_length)) goto fail;
+        if (thrt_hash(pool + e->value_offset) != e->ioc_hash) goto fail;
+        if (e->tags_length != 0 && !overlay_str_ok(pool, pool_size, e->tags_offset, e->tags_length)) goto fail;
+    }
 
-    /* Allocate the overlay descriptor */
-    thrt_overlay_t* ovl = (thrt_overlay_t*)calloc(1, sizeof(thrt_overlay_t));
+    ovl = (thrt_overlay_t*)calloc(1, sizeof(thrt_overlay_t));
     if (!ovl) {
-        munmap(map, file_size);
-        return NULL;
+        err = THRT_OVERLAY_ERR_NOMEM;
+        goto fail;
     }
-
     ovl->map_base = map;
     ovl->map_size = file_size;
     ovl->header = hdr;
-    ovl->entries = entries_ptr;
-    ovl->string_pool = pool_ptr;
+    ovl->entries = ents;
+    ovl->string_pool = pool;
+    ovl->pool_size = pool_size;
 
-    /* Build hash index for O(1) lookup.
-     * Capacity = next power of 2 >= entry_count * 2 (load factor <= 0.5).
-     * Linear probing with ioc_hash as key. */
+    /* Load factor <= 0.5, so every probe chain ends on an empty slot. */
     ovl->idx_capacity = overlay_next_pow2(hdr->entry_count * 2);
-    ovl->idx_slots = (uint32_t*)malloc(ovl->idx_capacity * sizeof(uint32_t));
+    ovl->idx_slots = (uint32_t*)malloc((size_t)ovl->idx_capacity * sizeof(uint32_t));
     if (!ovl->idx_slots) {
-        munmap(map, file_size);
         free(ovl);
-        return NULL;
+        err = THRT_OVERLAY_ERR_NOMEM;
+        goto fail;
     }
-
-    /* Initialize all slots to empty */
-    memset(ovl->idx_slots, 0xFF, ovl->idx_capacity * sizeof(uint32_t));
-
-    /* Insert each entry into the hash index */
-    uint32_t mask = ovl->idx_capacity - 1;
+    memset(ovl->idx_slots, 0xFF, (size_t)ovl->idx_capacity * sizeof(uint32_t));
+    mask = ovl->idx_capacity - 1;
     for (uint32_t i = 0; i < hdr->entry_count; i++) {
-        uint32_t slot = (uint32_t)(entries_ptr[i].ioc_hash & mask);
-        while (ovl->idx_slots[slot] != THRT_OVERLAY_IDX_EMPTY) {
-            slot = (slot + 1) & mask;
-        }
+        uint32_t slot = (uint32_t)(ents[i].ioc_hash & mask);
+        while (ovl->idx_slots[slot] != THRT_OVERLAY_IDX_EMPTY) slot = (slot + 1) & mask;
         ovl->idx_slots[slot] = i;
     }
-
+    if (why) *why = THRT_OVERLAY_OK;
     return ovl;
+
+fail:
+    munmap(map, file_size);
+    if (why) *why = err;
+    return NULL;
 }
 
-/* Look up an IOC in the overlay by its hash (produced by thrt_hash()).
- * Returns pointer to the matching entry, or NULL if not found.
- *
- * O(1) average via open-addressed hash table with linear probing.
- * Load factor <= 0.5 guarantees short probe chains. */
-static inline const thrt_overlay_entry_t* thrt_overlay_lookup(const thrt_overlay_t* ovl, uint64_t ioc_hash) {
-    if (!ovl || !ovl->idx_slots) return NULL;
+static __attribute__((unused)) thrt_overlay_t* thrt_overlay_load(const char* path) {
+    return thrt_overlay_load_ex(path, NULL);
+}
 
-    uint32_t mask = ovl->idx_capacity - 1;
-    uint32_t slot = (uint32_t)(ioc_hash & mask);
-
+/* Find the entry for a value. hash is thrt_hash() of the same bytes. The
+ * value is compared, so a different value with the same CRC32C misses.
+ * When the file lists one value twice, the first entry wins. */
+static inline const thrt_overlay_entry_t* thrt_overlay_find(const thrt_overlay_t* ovl,
+                                                            uint64_t hash,
+                                                            const char* value,
+                                                            size_t len) {
+    uint32_t mask, slot;
+    if (!ovl || !ovl->idx_slots || !value) return NULL;
+    mask = ovl->idx_capacity - 1;
+    slot = (uint32_t)(hash & mask);
     for (;;) {
         uint32_t idx = ovl->idx_slots[slot];
-        if (idx == THRT_OVERLAY_IDX_EMPTY) return NULL; /* Empty slot - not found */
-        if (ovl->entries[idx].ioc_hash == ioc_hash) return &ovl->entries[idx]; /* Match */
+        const thrt_overlay_entry_t* e;
+        if (idx == THRT_OVERLAY_IDX_EMPTY) return NULL;
+        e = &ovl->entries[idx];
+        if (e->ioc_hash == hash && e->value_length == len && memcmp(ovl->string_pool + e->value_offset, value, len) == 0)
+            return e;
         slot = (slot + 1) & mask;
     }
 }

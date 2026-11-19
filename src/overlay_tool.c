@@ -37,9 +37,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #define OVERLAY_JSON_MAX (8 * 1024 * 1024)
 #define OVERLAY_ENTRIES_MAX 65536u
+#define OVERLAY_VALUE_MAX 4096
+#define OVERLAY_POOL_MAX ((size_t)1 << 30)
 
 static const char *action_name(uint8_t a) {
     switch (a) {
@@ -141,18 +144,86 @@ static char *read_whole_file(const char *path, size_t *out_len) {
     return buf;
 }
 
+/* Growable string pool. Offset 0 holds a NUL, so 0 means "no string". */
+typedef struct {
+    char *data;
+    size_t len;
+    size_t cap;
+} pool_t;
+
+static int pool_add(pool_t *p, const char *s, size_t n, uint32_t *off) {
+    if (n > OVERLAY_POOL_MAX || p->len > OVERLAY_POOL_MAX - n - 1) return -1;
+    if (p->len + n + 1 > p->cap) {
+        size_t cap = p->cap ? p->cap : 4096;
+        char *d;
+        while (cap < p->len + n + 1) cap *= 2;
+        d = (char *)realloc(p->data, cap);
+        if (d == NULL) return -1;
+        p->data = d;
+        p->cap = cap;
+    }
+    memcpy(p->data + p->len, s, n);
+    p->data[p->len + n] = '\0';
+    *off = (uint32_t)p->len;
+    p->len += n + 1;
+    return 0;
+}
+
+/* Index of an earlier entry with the same value, or -1. */
+static long find_dup(const uint32_t *slots, uint32_t mask, const thrt_overlay_entry_t *ents, const pool_t *p,
+                     uint64_t h, const char *v, size_t n, uint32_t *slot_out) {
+    uint32_t slot = (uint32_t)h & mask;
+    while (slots[slot] != THRT_OVERLAY_IDX_EMPTY) {
+        const thrt_overlay_entry_t *e = &ents[slots[slot]];
+        if (e->ioc_hash == h && e->value_length == n && memcmp(p->data + e->value_offset, v, n) == 0)
+            return (long)slots[slot];
+        slot = (slot + 1) & mask;
+    }
+    *slot_out = slot;
+    return -1;
+}
+
+static int write_atomic(const char *out_path, const unsigned char *buf, size_t len) {
+    char tmp[1100];
+    FILE *f;
+    int n = snprintf(tmp, sizeof tmp, "%s.tmp.%ld", out_path, (long)getpid());
+    if (n < 0 || (size_t)n >= sizeof tmp) {
+        fprintf(stderr, "overlay_tool: output path too long\n");
+        return -1;
+    }
+    f = fopen(tmp, "wb");
+    if (f == NULL) {
+        perror(tmp);
+        return -1;
+    }
+    if (fwrite(buf, 1, len, f) != len || fflush(f) != 0 || fsync(fileno(f)) != 0) {
+        perror(tmp);
+        fclose(f);
+        unlink(tmp);
+        return -1;
+    }
+    if (fclose(f) != 0 || rename(tmp, out_path) != 0) {
+        perror(out_path);
+        unlink(tmp);
+        return -1;
+    }
+    return 0;
+}
+
 static int cmd_write(const char *out_path, const char *json_path) {
     char sibling[1024];
     const char *src;
     char *text;
-    struct json_object *root, *entries, *item, *jv;
-    uint32_t n, i, tenant_id;
+    struct json_object *root = NULL, *entries, *item, *jv;
+    uint32_t n, i, tenant_id, cap, mask;
+    uint32_t *slots = NULL;
     size_t off, need;
-    unsigned char *buf;
+    unsigned char *buf = NULL;
     thrt_overlay_header_t hdr;
-    thrt_overlay_entry_t *ents;
-    uint32_t crc;
-    FILE *f;
+    thrt_overlay_entry_t *ents = NULL;
+    pool_t pool = {0};
+    uint32_t crc, zero_off;
+    int rc = 1;
 
     src = json_path;
     if (src == NULL || src[0] == '\0') {
@@ -174,15 +245,13 @@ static int cmd_write(const char *out_path, const char *json_path) {
     }
     if (!json_object_object_get_ex(root, "entries", &entries) || json_object_get_type(entries) != json_type_array) {
         fprintf(stderr, "%s: missing entries array\n", src);
-        json_object_put(root);
-        return 1;
+        goto out;
     }
 
     n = (uint32_t)json_object_array_length(entries);
     if (n == 0 || n > OVERLAY_ENTRIES_MAX) {
         fprintf(stderr, "%s: entry count %u not in 1..%u\n", src, n, OVERLAY_ENTRIES_MAX);
-        json_object_put(root);
-        return 1;
+        goto out;
     }
 
     tenant_id = 1;
@@ -196,34 +265,58 @@ static int cmd_write(const char *out_path, const char *json_path) {
     hdr.timestamp = (uint64_t)time(NULL);
 
     ents = (thrt_overlay_entry_t *)calloc(n, sizeof(*ents));
-    if (ents == NULL) {
+    cap = overlay_next_pow2(n * 2);
+    mask = cap - 1;
+    slots = (uint32_t *)malloc((size_t)cap * sizeof(*slots));
+    if (ents == NULL || slots == NULL || pool_add(&pool, "", 0, &zero_off) != 0) {
         fprintf(stderr, "overlay_tool: out of memory\n");
-        json_object_put(root);
-        return 1;
+        goto out;
     }
+    memset(slots, 0xFF, (size_t)cap * sizeof(*slots));
 
     for (i = 0; i < n; i++) {
         const char *ioc = NULL;
         const char *act = NULL;
         const char *cat = NULL;
+        size_t ioc_len;
         uint8_t action;
+        uint32_t slot = 0;
+        long dup;
         int conf;
 
         item = json_object_array_get_idx(entries, (int)i);
-        if (item == NULL) continue;
+        if (item == NULL) {
+            fprintf(stderr, "%s: entry %u is not an object\n", src, i);
+            goto out;
+        }
         if (json_object_object_get_ex(item, "ioc", &jv))
             ioc = json_object_get_string(jv);
         else if (json_object_object_get_ex(item, "ioc_value", &jv))
             ioc = json_object_get_string(jv);
         if (ioc == NULL || ioc[0] == '\0') {
             fprintf(stderr, "%s: entry %u missing ioc\n", src, i);
-            free(ents);
-            json_object_put(root);
-            return 1;
+            goto out;
         }
+        ioc_len = strlen(ioc);
+        if (ioc_len > OVERLAY_VALUE_MAX) {
+            fprintf(stderr, "%s: entry %u ioc longer than %d bytes\n", src, i, OVERLAY_VALUE_MAX);
+            goto out;
+        }
+        ents[i].ioc_hash = thrt_hash(ioc);
+        dup = find_dup(slots, mask, ents, &pool, ents[i].ioc_hash, ioc, ioc_len, &slot);
+        if (dup >= 0) {
+            fprintf(stderr, "%s: entry %u repeats the ioc of entry %ld\n", src, i, dup);
+            goto out;
+        }
+        if (pool_add(&pool, ioc, ioc_len, &ents[i].value_offset) != 0) {
+            fprintf(stderr, "%s: string pool full\n", src);
+            goto out;
+        }
+        ents[i].value_length = (uint32_t)ioc_len;
+        slots[slot] = i;
+
         if (json_object_object_get_ex(item, "action", &jv)) act = json_object_get_string(jv);
         action = parse_action(act);
-        ents[i].ioc_hash = thrt_hash(ioc);
         ents[i].action = action;
         if (action == OVERLAY_ACTION_WHITELIST) {
             ents[i].suppress_mode = OVERLAY_SUPPRESS_FULL;
@@ -254,75 +347,95 @@ static int cmd_write(const char *out_path, const char *json_path) {
         if (json_object_object_get_ex(item, "category", &jv)) cat = json_object_get_string(jv);
         ents[i].category_mask = parse_category(cat);
         if (action == OVERLAY_ACTION_ADD && ents[i].category_mask == 0) ents[i].category_mask = THRT_CAT_C2;
+
+        /* tags: an array of strings, stored as its JSON text. */
+        if (json_object_object_get_ex(item, "tags", &jv)) {
+            const char *tj;
+            size_t k, tn;
+            if (json_object_get_type(jv) != json_type_array) {
+                fprintf(stderr, "%s: entry %u tags is not an array\n", src, i);
+                goto out;
+            }
+            tn = json_object_array_length(jv);
+            for (k = 0; k < tn; k++) {
+                if (json_object_get_type(json_object_array_get_idx(jv, (int)k)) != json_type_string) {
+                    fprintf(stderr, "%s: entry %u tags holds a non-string\n", src, i);
+                    goto out;
+                }
+            }
+            if (tn > 0) {
+                tj = json_object_to_json_string_ext(jv, JSON_C_TO_STRING_PLAIN);
+                if (tj == NULL || pool_add(&pool, tj, strlen(tj), &ents[i].tags_offset) != 0) {
+                    fprintf(stderr, "%s: string pool full\n", src);
+                    goto out;
+                }
+                ents[i].tags_length = (uint32_t)strlen(tj);
+            }
+        }
     }
 
-    need = sizeof hdr + (size_t)n * sizeof(*ents) + sizeof crc;
+    need = sizeof hdr + (size_t)n * sizeof(*ents) + pool.len + sizeof crc;
     buf = (unsigned char *)malloc(need);
     if (buf == NULL) {
         fprintf(stderr, "overlay_tool: out of memory\n");
-        free(ents);
-        json_object_put(root);
-        return 1;
+        goto out;
     }
     off = 0;
     memcpy(buf + off, &hdr, sizeof hdr);
     off += sizeof hdr;
     memcpy(buf + off, ents, (size_t)n * sizeof(*ents));
     off += (size_t)n * sizeof(*ents);
+    memcpy(buf + off, pool.data, pool.len);
+    off += pool.len;
     crc = crc32c_platform(0xFFFFFFFFu, buf, off) ^ 0xFFFFFFFFu;
     memcpy(buf + off, &crc, sizeof crc);
     off += sizeof crc;
 
-    f = fopen(out_path, "wb");
-    if (f == NULL) {
-        perror(out_path);
-        free(buf);
-        free(ents);
-        json_object_put(root);
-        return 1;
-    }
-    if (fwrite(buf, 1, off, f) != off) {
-        perror("fwrite");
-        fclose(f);
-        free(buf);
-        free(ents);
-        json_object_put(root);
-        return 1;
-    }
-    fclose(f);
+    if (write_atomic(out_path, buf, off) != 0) goto out;
 
     printf("wrote %s (%zu bytes, %u entries)\n", out_path, off, n);
-    for (i = 0; i < n; i++) {
-        const char *ioc = NULL;
-        item = json_object_array_get_idx(entries, (int)i);
-        if (item != NULL) {
-            if (json_object_object_get_ex(item, "ioc", &jv))
-                ioc = json_object_get_string(jv);
-            else if (json_object_object_get_ex(item, "ioc_value", &jv))
-                ioc = json_object_get_string(jv);
-        }
-        printf("  %-9s %s  hash=0x%llx  action='%c'\n", action_name(ents[i].action), ioc ? ioc : "?",
+    for (i = 0; i < n; i++)
+        printf("  %-9s %s  hash=0x%llx  action='%c'\n", action_name(ents[i].action), pool.data + ents[i].value_offset,
                (unsigned long long)ents[i].ioc_hash, (char)ents[i].action);
-    }
+    rc = 0;
 
+out:
     free(buf);
+    free(slots);
     free(ents);
+    free(pool.data);
     json_object_put(root);
-    return 0;
+    return rc;
+}
+
+static const char *load_reason(int why) {
+    switch (why) {
+        case THRT_OVERLAY_ERR_VERSION:
+            return "not a version 2 overlay, rebuild it";
+        case THRT_OVERLAY_ERR_CHECKSUM:
+            return "CRC32C mismatch";
+        case THRT_OVERLAY_ERR_FORMAT:
+            return "bad magic or an entry out of bounds";
+        case THRT_OVERLAY_ERR_NOMEM:
+            return "out of memory";
+        default:
+            return "cannot open or map";
+    }
 }
 
 static int cmd_lookup(const char *path, const char *ioc) {
     thrt_overlay_t *ovl;
     uint64_t h;
+    int why = 0;
     const thrt_overlay_entry_t *e;
 
-    ovl = thrt_overlay_load(path);
+    ovl = thrt_overlay_load_ex(path, &why);
     if (ovl == NULL) {
-        fprintf(stderr, "failed to load overlay %s (magic/version/CRC)\n", path);
+        fprintf(stderr, "failed to load overlay %s: %s\n", path, load_reason(why));
         return 1;
     }
     h = thrt_hash(ioc);
-    e = thrt_overlay_lookup(ovl, h);
+    e = thrt_overlay_find(ovl, h, ioc, strlen(ioc));
     if (e == NULL) {
         printf("MISS  ioc=%s  hash=0x%llx\n", ioc, (unsigned long long)h);
         thrt_overlay_free(ovl);

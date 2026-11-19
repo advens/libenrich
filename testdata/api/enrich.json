@@ -1,0 +1,41 @@
+{
+  "output": "build/api/threat.thrt",
+  "feeds": [
+    {
+      "name": "pub",
+      "type": "csv",
+      "layer": "cti",
+      "path": "testdata/api/pub.csv"
+    },
+    {
+      "name": "secret",
+      "type": "csv",
+      "layer": "cti_r",
+      "path": "testdata/api/secret.csv"
+    },
+    {
+      "name": "misp",
+      "type": "misp",
+      "layer": "cti",
+      "path": "testdata/api/labels.misp.json"
+    },
+    {
+      "name": "assets",
+      "type": "tags",
+      "layer": "tags",
+      "path": "testdata/api/assets.tags"
+    },
+    {
+      "name": "carto",
+      "type": "tags",
+      "layer": "tags",
+      "path": "testdata/api/carto.tags"
+    },
+    {
+      "name": "site",
+      "type": "overlay",
+      "path": "testdata/api/overlay.json",
+      "dest": "build/api/site.ovly"
+    }
+  ]
+}

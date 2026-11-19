@@ -1,0 +1,6 @@
+{"entries":[
+ {"ioc":"wl.example","action":"whitelist"},
+ {"ioc":"soft.example","action":"whitelist","suppress_mode":"score"},
+ {"ioc":"add.example","action":"add","confidence":70,"category":"malware"},
+ {"ioc":"tag.example","action":"tag","tags":["vip","owner:it"]}
+]}

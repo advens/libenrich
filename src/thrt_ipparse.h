@@ -1,4 +1,4 @@
-/* thrt_ipparse.h — validated IP / CIDR parsing for the CTI database builder.
+/* thrt_ipparse.h: validated IP / CIDR parsing for the CTI database builder.
  *
  * Copyright 2026 Advens.
  * Licensed under the Apache License, Version 2.0.
@@ -44,6 +44,61 @@ typedef struct {
     uint8_t v6_end[16];
 } parsed_ip_t;
 
+/* Dotted-quad IPv4: four decimal octets, each 0 to 255, no leading zero,
+ * nothing else. This is inet_pton(AF_INET) on glibc and FreeBSD. macOS also
+ * takes leading zeros, so the builder and the lookups use this instead and
+ * read an address the same way on every platform. */
+static inline int thrt_ipv4_strict(const char* s, size_t len, uint32_t* out) {
+    uint32_t v = 0;
+    unsigned cur = 0;
+    int octets = 0, saw = 0;
+    for (size_t i = 0; i < len; i++) {
+        char c = s[i];
+        if (c >= '0' && c <= '9') {
+            if (saw && cur == 0) return 0;
+            cur = cur * 10 + (unsigned)(c - '0');
+            if (cur > 255) return 0;
+            if (!saw) {
+                if (++octets > 4) return 0;
+                saw = 1;
+            }
+        } else if (c == '.' && saw) {
+            if (octets == 4) return 0;
+            v = (v << 8) | cur;
+            cur = 0;
+            saw = 0;
+        } else {
+            return 0;
+        }
+    }
+    if (octets < 4 || !saw) return 0;
+    *out = (v << 8) | cur;
+    return 1;
+}
+
+/* IPv6 text: hex digits, ':' and '.' (an embedded IPv4), at least one ':',
+ * no zone. Then inet_pton(AF_INET6) decides. macOS accepts a "%zone"
+ * suffix that glibc and FreeBSD refuse, so a zone is refused here. */
+static inline int thrt_ipv6_strict(const char* s, size_t len, uint8_t out[16]) {
+    char buf[46];
+    struct in6_addr a6;
+    int colon = 0;
+    if (len == 0 || len >= sizeof buf) return 0;
+    for (size_t i = 0; i < len; i++) {
+        char c = s[i];
+        if (c == ':')
+            colon = 1;
+        else if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F') || c == '.'))
+            return 0;
+    }
+    if (!colon) return 0;
+    memcpy(buf, s, len);
+    buf[len] = '\0';
+    if (inet_pton(AF_INET6, buf, &a6) != 1) return 0;
+    memcpy(out, a6.s6_addr, 16);
+    return 1;
+}
+
 /* Parse a full decimal prefix length. Returns 1 and sets *out only when the
  * whole suffix is digits and the value is within [0, max]. Rejects an empty
  * suffix, a leading sign or space, trailing junk, and out-of-range values. */
@@ -71,8 +126,8 @@ static inline int parse_prefix_len(const char* s, int max, int* out) {
  * Returns 1 on success. Ranges wider than THRT_MIN_*_PREFIX are rejected so a
  * malformed feed cannot blanket the address space. */
 static __attribute__((unused)) int parse_ip_or_cidr(const char* value, int allow_cidr, parsed_ip_t* out) {
-    struct in_addr a4;
-    struct in6_addr a6;
+    uint32_t v4;
+    uint8_t a6[16];
     const char* slash;
 
     if (!value || !*value || !out) return 0;
@@ -90,26 +145,26 @@ static __attribute__((unused)) int parse_ip_or_cidr(const char* value, int allow
         netbuf[nlen] = '\0';
 
         prefix = 0;
-        if (inet_pton(AF_INET, netbuf, &a4) == 1) {
+        if (thrt_ipv4_strict(netbuf, nlen, &v4)) {
             uint32_t net;
             uint32_t mask;
             if (!parse_prefix_len(slash + 1, 32, &prefix)) return 0;
             if (prefix < THRT_MIN_IPV4_PREFIX) return 0;
-            net = ntohl(a4.s_addr);
+            net = v4;
             mask = (prefix == 0) ? 0u : (0xFFFFFFFFu << (32 - prefix));
             out->family = 4;
             out->v4_start = net & mask;
             out->v4_end = out->v4_start | ~mask;
             return 1;
         }
-        if (inet_pton(AF_INET6, netbuf, &a6) == 1) {
+        if (thrt_ipv6_strict(netbuf, nlen, a6)) {
             if (!parse_prefix_len(slash + 1, 128, &prefix)) return 0;
             if (prefix < THRT_MIN_IPV6_PREFIX) return 0;
             out->family = 6;
             for (int b = 0; b < 16; b++) {
                 int bits = prefix - b * 8;
                 uint8_t m = (bits >= 8) ? 0xFF : (bits <= 0) ? 0x00 : (uint8_t)(0xFF << (8 - bits));
-                out->v6_start[b] = (uint8_t)(a6.s6_addr[b] & m);
+                out->v6_start[b] = (uint8_t)(a6[b] & m);
                 out->v6_end[b] = (uint8_t)(out->v6_start[b] | (uint8_t)~m);
             }
             return 1;
@@ -117,15 +172,15 @@ static __attribute__((unused)) int parse_ip_or_cidr(const char* value, int allow
         return 0;
     }
 
-    if (inet_pton(AF_INET, value, &a4) == 1) {
+    if (thrt_ipv4_strict(value, strlen(value), &v4)) {
         out->family = 4;
-        out->v4_start = out->v4_end = ntohl(a4.s_addr);
+        out->v4_start = out->v4_end = v4;
         return 1;
     }
-    if (inet_pton(AF_INET6, value, &a6) == 1) {
+    if (thrt_ipv6_strict(value, strlen(value), a6)) {
         out->family = 6;
-        memcpy(out->v6_start, a6.s6_addr, 16);
-        memcpy(out->v6_end, a6.s6_addr, 16);
+        memcpy(out->v6_start, a6, 16);
+        memcpy(out->v6_end, a6, 16);
         return 1;
     }
     return 0;

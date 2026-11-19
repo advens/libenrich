@@ -68,6 +68,7 @@
 #include "thrt_format.h"
 #include "thrt_ipparse.h"
 #include "thrt_logic.h"
+#include "thrt_validate.h"
 
 // Constants
 #define MAX_LINE_LEN 65536
@@ -88,6 +89,10 @@ typedef enum {
 /* Current layer being processed */
 static layer_type_t g_current_layer = LAYER_CTI;
 
+/* Feeds that contributed to the public CTI layer. Written to the header
+ * (public_feed_mask) so readers print only these feed names. */
+static uint64_t g_public_feeds = 0;
+
 /* --- Colors & Icons --- */
 #define COL_RESET   "\033[0m"
 #define COL_BOLD    "\033[1m"
@@ -107,13 +112,18 @@ static layer_type_t g_current_layer = LAYER_CTI;
  * Matches the new thrt_metadata_t layout
  * ============================================================================ */
 typedef struct {
-    uint8_t  confidence;
+    uint8_t  confidence;      /* public CTI only */
+    uint8_t  confidence_r;    /* restricted CTI only */
     uint8_t  type_mask;       /* THRT_TYPE_CTI | THRT_TYPE_CTI_R | THRT_TYPE_TAGS */
     uint8_t  tlp_mask;        /* THRT_TLP_* flags */
     uint16_t category_mask;   /* THRT_CAT_* flags */
-    uint64_t feed_mask;       /* Bitmask of contributing feeds */
-    uint32_t tags_offset;     /* Offset into string pool */
-    uint32_t tags_length;     /* Length of tags JSON blob */
+    uint64_t feed_mask;       /* Every contributing feed, any layer. Eviction
+                               * needs the full provenance. The writer records
+                               * which feeds are public in the header. */
+    uint32_t tags_offset;     /* Context tags (tags layer), string pool */
+    uint32_t tags_length;
+    uint32_t labels_offset;   /* Public CTI labels, string pool */
+    uint32_t labels_length;
 } builder_meta_v4_t;
 
 typedef struct {
@@ -134,10 +144,21 @@ typedef struct {
     uint8_t feed_idx;     /* 0-63 for bitmask position */
 } feed_entry_t;
 
-/* --- Deletion Tracking (Hash Set) --- */
+/* --- Deletion Tracking (Hash Set) ---
+ * A withdrawn indicator is matched by identity, never by hash alone: an
+ * address or network by its exact range, anything else by its exact string.
+ * A 32-bit hash match would also delete every other indicator that shares
+ * the hash. */
 #define DELETE_SET_BUCKETS 65536
+#define DEL_KIND_IPV4 0
+#define DEL_KIND_IPV6 1
+#define DEL_KIND_STR 2
 typedef struct delete_entry {
-    uint64_t hash;
+    uint64_t key;
+    uint8_t kind;
+    uint32_t v4_start, v4_end;
+    uint8_t v6_start[16], v6_end[16];
+    char *str;
     struct delete_entry *next;
 } delete_entry_t;
 
@@ -181,31 +202,68 @@ static void delete_set_init(void) {
     g_delete_set = xcalloc(1, sizeof(delete_set_t));
 }
 
-static void delete_set_add(uint64_t hash) {
-    uint32_t bucket;
-    delete_entry_t *entry;
-    if (!g_delete_set) delete_set_init();
-    bucket = hash % DELETE_SET_BUCKETS;
+static uint64_t ioc_key_ipv4(uint32_t s, uint32_t e);
+static uint64_t ioc_key_ipv6(const uint8_t *s, const uint8_t *e);
+static uint64_t ioc_key_str(uint64_t strhash);
 
-    for (delete_entry_t *e = g_delete_set->buckets[bucket]; e; e = e->next) {
-        if (e->hash == hash) return;
+static int delete_entry_eq(const delete_entry_t *a, const delete_entry_t *b) {
+    if (a->key != b->key || a->kind != b->kind) return 0;
+    if (a->kind == DEL_KIND_IPV4) return a->v4_start == b->v4_start && a->v4_end == b->v4_end;
+    if (a->kind == DEL_KIND_IPV6)
+        return memcmp(a->v6_start, b->v6_start, 16) == 0 && memcmp(a->v6_end, b->v6_end, 16) == 0;
+    return strcmp(a->str, b->str) == 0;
+}
+
+/* Describe a value the way add_ioc() stores it. str is borrowed. */
+static void delete_probe_of(const char *value, int is_ip_type, delete_entry_t *d) {
+    parsed_ip_t ip;
+    memset(d, 0, sizeof *d);
+    if (parse_ip_or_cidr(value, is_ip_type, &ip)) {
+        if (ip.family == 4) {
+            d->kind = DEL_KIND_IPV4;
+            d->v4_start = ip.v4_start;
+            d->v4_end = ip.v4_end;
+            d->key = ioc_key_ipv4(ip.v4_start, ip.v4_end);
+        } else {
+            d->kind = DEL_KIND_IPV6;
+            memcpy(d->v6_start, ip.v6_start, 16);
+            memcpy(d->v6_end, ip.v6_end, 16);
+            d->key = ioc_key_ipv6(ip.v6_start, ip.v6_end);
+        }
+        return;
     }
+    d->kind = DEL_KIND_STR;
+    d->str = (char *)value;
+    d->key = ioc_key_str(thrt_hash(value));
+}
 
+static int delete_set_has(const delete_entry_t *probe) {
+    if (!g_delete_set) return 0;
+    for (delete_entry_t *e = g_delete_set->buckets[probe->key % DELETE_SET_BUCKETS]; e; e = e->next)
+        if (delete_entry_eq(e, probe)) return 1;
+    return 0;
+}
+
+static void delete_set_add(const char *value, int is_ip_type) {
+    delete_entry_t probe;
+    delete_entry_t *entry;
+    uint32_t bucket;
+    if (!g_delete_set) delete_set_init();
+    delete_probe_of(value, is_ip_type, &probe);
+    if (delete_set_has(&probe)) return;
     entry = xmalloc(sizeof(delete_entry_t));
-    entry->hash = hash;
+    *entry = probe;
+    if (probe.kind == DEL_KIND_STR) {
+        entry->str = strdup(value);
+        if (entry->str == NULL) {
+            fprintf(stderr, "thrtutil: out of memory (delete set)\n");
+            exit(1);
+        }
+    }
+    bucket = (uint32_t)(probe.key % DELETE_SET_BUCKETS);
     entry->next = g_delete_set->buckets[bucket];
     g_delete_set->buckets[bucket] = entry;
     g_delete_set->count++;
-}
-
-static int delete_set_contains(uint64_t hash) {
-    uint32_t bucket;
-    if (!g_delete_set) return 0;
-    bucket = hash % DELETE_SET_BUCKETS;
-    for (delete_entry_t *e = g_delete_set->buckets[bucket]; e; e = e->next) {
-        if (e->hash == hash) return 1;
-    }
-    return 0;
 }
 
 static void delete_set_free(void) {
@@ -214,6 +272,7 @@ static void delete_set_free(void) {
         delete_entry_t *e = g_delete_set->buckets[i];
         while (e) {
             delete_entry_t *next = e->next;
+            free(e->str);
             free(e);
             e = next;
         }
@@ -413,6 +472,9 @@ typedef struct {
 static uint32_t add_meta_v4(uint8_t confidence, uint8_t type_mask, uint8_t tlp_mask,
                             uint16_t category_mask, uint64_t feed_mask,
                             const char *tags_json);
+static uint32_t add_meta_raw(uint8_t confidence, uint8_t confidence_r, uint8_t type_mask,
+                             uint8_t tlp_mask, uint16_t category_mask, uint64_t feed_mask,
+                             const char *tags_json, const char *labels_json);
 static void add_ioc(const char* value, const char* type, uint32_t meta_idx);
 
 /* ============================================================================
@@ -430,11 +492,13 @@ static meta_dedup_entry_t *meta_dedup_ht[META_DEDUP_BUCKETS] = {0};
 
 /* Canonical metadata dedup key (FNV-1a over all fields + tags content). Shared
  * by add_meta_v4 and rebuild_meta_dedup so the two can never diverge. */
-static uint64_t meta_make_key(uint8_t confidence, uint8_t type_mask,
+static uint64_t meta_make_key(uint8_t confidence, uint8_t confidence_r, uint8_t type_mask,
                               uint8_t tlp_mask, uint16_t category_mask,
-                              uint64_t feed_mask, const char *tags_json) {
+                              uint64_t feed_mask, const char *tags_json,
+                              const char *labels_json) {
     uint64_t k = 0xcbf29ce484222325ULL;
     k ^= confidence;    k *= 0x100000001b3ULL;
+    k ^= confidence_r;  k *= 0x100000001b3ULL;
     k ^= type_mask;     k *= 0x100000001b3ULL;
     k ^= tlp_mask;      k *= 0x100000001b3ULL;
     k ^= category_mask; k *= 0x100000001b3ULL;
@@ -445,86 +509,109 @@ static uint64_t meta_make_key(uint8_t confidence, uint8_t type_mask,
             k *= 0x100000001b3ULL;
         }
     }
+    k ^= 0x1f; k *= 0x100000001b3ULL;   /* separates tags from labels */
+    if (labels_json && labels_json[0] != '\0') {
+        for (const char *t = labels_json; *t; t++) {
+            k ^= (unsigned char)*t;
+            k *= 0x100000001b3ULL;
+        }
+    }
     return k;
 }
 
+/* One layer's contribution. The public fields (confidence, TLP, categories)
+ * carry public CTI only: a restricted contribution keeps its score in
+ * confidence_r and drops its labels, a public CTI contribution keeps its
+ * labels apart from context tags, and a tags contribution keeps only its
+ * tags. merge_meta()
+ * then ORs layers without mixing a restricted value into a public field. */
 static uint32_t add_meta_v4(uint8_t confidence, uint8_t type_mask, uint8_t tlp_mask,
                             uint16_t category_mask, uint64_t feed_mask,
                             const char *tags_json) {
-    uint32_t tags_offset = 0;
-    uint32_t tags_length = 0;
+    if (type_mask == THRT_TYPE_CTI) {
+        g_public_feeds |= feed_mask;
+        return add_meta_raw(confidence, 0, type_mask, tlp_mask, category_mask, feed_mask, NULL, tags_json);
+    }
+    if (type_mask == THRT_TYPE_CTI_R)
+        return add_meta_raw(0, confidence, type_mask, 0, 0, feed_mask, NULL, NULL);
+    return add_meta_raw(0, 0, type_mask, 0, 0, feed_mask, tags_json, NULL);
+}
+
+/* A JSON blob in the pool equals text. */
+static int pool_blob_eq(uint32_t off, uint32_t len, const char *text, size_t tlen) {
+    if (len != tlen) return 0;
+    return len == 0 || memcmp(str_pool.data + off, text, len) == 0;
+}
+
+/* Copy a JSON blob into the pool. 0/0 for none. */
+static void pool_blob_put(const char *text, uint32_t *off, uint32_t *len) {
+    size_t n = text ? strlen(text) : 0;
+    *off = 0;
+    *len = 0;
+    if (n == 0) return;
+    ensure_capacity();
+    *off = (uint32_t)str_pool.len;
+    memcpy(str_pool.data + str_pool.len, text, n + 1);
+    str_pool.len += n + 1;
+    *len = (uint32_t)n;
+}
+
+static uint32_t add_meta_raw(uint8_t confidence, uint8_t confidence_r, uint8_t type_mask,
+                             uint8_t tlp_mask, uint16_t category_mask, uint64_t feed_mask,
+                             const char *tags_json, const char *labels_json) {
+    size_t tlen = tags_json ? strlen(tags_json) : 0;
+    size_t llen = labels_json ? strlen(labels_json) : 0;
     uint64_t dedup_key;
     uint32_t bucket;
     uint32_t idx;
+    builder_meta_v4_t m = {0};
     meta_dedup_entry_t *entry;
 
-    /* Store tags JSON in string pool if present */
-    if (tags_json && tags_json[0] != '\0') {
-        tags_length = strlen(tags_json);
-        ensure_capacity();
-        tags_offset = str_pool.len;
-        memcpy(str_pool.data + tags_offset, tags_json, tags_length + 1);
-        str_pool.len += tags_length + 1;
-    }
-
-    /* Build a dedup key by hashing all metadata fields + tags content. */
-    dedup_key = meta_make_key(confidence, type_mask, tlp_mask,
-                                       category_mask, feed_mask, tags_json);
-
-    /* Lookup in hash table */
+    /* An identical record already exists: reuse it, and store nothing. */
+    dedup_key = meta_make_key(confidence, confidence_r, type_mask, tlp_mask,
+                              category_mask, feed_mask, tags_json, labels_json);
     bucket = (uint32_t)(dedup_key % META_DEDUP_BUCKETS);
     for (meta_dedup_entry_t *e = meta_dedup_ht[bucket]; e; e = e->next) {
-        if (e->key == dedup_key) {
-            /* Verify fields match (handle hash collision) */
-            builder_meta_v4_t *m = &meta_db.items[e->meta_idx];
-            if (m->confidence == confidence &&
-                m->type_mask == type_mask &&
-                m->tlp_mask == tlp_mask &&
-                m->category_mask == category_mask &&
-                m->feed_mask == feed_mask &&
-                m->tags_length == tags_length &&
-                (tags_length == 0 ||
-                 memcmp(str_pool.data + m->tags_offset,
-                        str_pool.data + tags_offset, tags_length) == 0)) {
-                return e->meta_idx;
-            }
-        }
+        const builder_meta_v4_t *c;
+        if (e->key != dedup_key) continue;
+        c = &meta_db.items[e->meta_idx];
+        if (c->confidence == confidence && c->confidence_r == confidence_r &&
+            c->type_mask == type_mask && c->tlp_mask == tlp_mask &&
+            c->category_mask == category_mask && c->feed_mask == feed_mask &&
+            pool_blob_eq(c->tags_offset, c->tags_length, tags_json, tlen) &&
+            pool_blob_eq(c->labels_offset, c->labels_length, labels_json, llen))
+            return e->meta_idx;
     }
 
-    /* Add new metadata entry */
+    m.confidence = confidence;
+    m.confidence_r = confidence_r;
+    m.type_mask = type_mask;
+    m.tlp_mask = tlp_mask;
+    m.category_mask = category_mask;
+    m.feed_mask = feed_mask;
+    pool_blob_put(tags_json, &m.tags_offset, &m.tags_length);
+    pool_blob_put(labels_json, &m.labels_offset, &m.labels_length);
     ensure_capacity();
     idx = meta_db.count;
-    meta_db.items[idx] = (builder_meta_v4_t){
-        .confidence = confidence,
-        .type_mask = type_mask,
-        .tlp_mask = tlp_mask,
-        .category_mask = category_mask,
-        .feed_mask = feed_mask,
-        .tags_offset = tags_offset,
-        .tags_length = tags_length
-    };
+    meta_db.items[idx] = m;
     meta_db.count++;
 
-    /* Insert into dedup hash table */
     entry = xmalloc(sizeof(meta_dedup_entry_t));
     entry->key = dedup_key;
     entry->meta_idx = idx;
     entry->next = meta_dedup_ht[bucket];
     meta_dedup_ht[bucket] = entry;
-
     return idx;
 }
 
 /* ============================================================================
  * (type,value) IOC DEDUP + feed snapshot-replace support
  *
- * Active ONLY in --apply-delta fold mode (g_ioc_dedup_active). In a normal full
- * build it is inert, so full-build output is byte-for-byte unchanged.
- *
- * The fold path seeds this set from the just-loaded DB, so a re-delivered IOC
- * is NOT appended: a duplicate (type,value) merges its feed metadata into the
- * existing row. Identity is by VALUE, so IP ranges are deduped too, not just
- * strings.
+ * Active in full builds and in --apply-delta folds. The fold path seeds this
+ * set from the just-loaded DB. A re-delivered IOC, or the same IOC from
+ * another feed or layer, is NOT appended: its metadata merges into the
+ * existing row, so a lookup sees every layer. Identity is the exact range or
+ * the exact string; the key only picks the bucket.
  * ============================================================================ */
 #define IOC_DEDUP_BUCKETS 65536
 #define IOC_KIND_IPV4 0
@@ -561,10 +648,24 @@ static uint64_t ioc_key_str(uint64_t strhash) {
     return k;
 }
 
-static ioc_dedup_entry_t *ioc_dedup_find(uint64_t key) {
+/* The row an entry points at holds this exact indicator. The key is a
+ * hash, so a match on it alone is not identity. */
+static int ioc_dedup_same(const ioc_dedup_entry_t *e, const delete_entry_t *id) {
+    if (e->kind == IOC_KIND_IPV4)
+        return id->kind == DEL_KIND_IPV4 && e->index < ip_db.count && ip_db.items[e->index].start == id->v4_start &&
+               ip_db.items[e->index].end == id->v4_end;
+    if (e->kind == IOC_KIND_IPV6)
+        return id->kind == DEL_KIND_IPV6 && e->index < ip6_db.count &&
+               memcmp(ip6_db.items[e->index].start, id->v6_start, 16) == 0 &&
+               memcmp(ip6_db.items[e->index].end, id->v6_end, 16) == 0;
+    return id->kind == DEL_KIND_STR && e->index < str_db.count &&
+           strcmp(str_pool.data + str_db.items[e->index].offset, id->str) == 0;
+}
+
+static ioc_dedup_entry_t *ioc_dedup_find(uint64_t key, const delete_entry_t *id) {
     uint32_t b = (uint32_t)(key % IOC_DEDUP_BUCKETS);
     for (ioc_dedup_entry_t *e = g_ioc_dedup_ht[b]; e; e = e->next)
-        if (e->key == key) return e;
+        if (e->key == key && ioc_dedup_same(e, id)) return e;
     return NULL;
 }
 static void ioc_dedup_insert(uint64_t key, uint8_t kind, uint32_t index) {
@@ -590,6 +691,91 @@ static uint32_t *ioc_meta_slot(uint8_t kind, uint32_t index) {
     return NULL;
 }
 
+/* Tags are stored as a JSON array of strings. Scan one array into raw
+ * string tokens (quotes included). Returns the count, or -1 when the text
+ * is not such an array or holds more than max items. */
+static int tags_tokens(const char *s, const char **tok, size_t *tlen, int max) {
+    int n = 0;
+    while (*s == ' ') s++;
+    if (*s++ != '[') return -1;
+    for (;;) {
+        const char *start;
+        while (*s == ' ') s++;
+        if (*s == ']') return n;
+        if (*s != '"' || n == max) return -1;
+        start = s++;
+        while (*s && *s != '"') s += (*s == '\\' && s[1]) ? 2 : 1;
+        if (*s != '"') return -1;
+        s++;
+        tok[n] = start;
+        tlen[n] = (size_t)(s - start);
+        n++;
+        while (*s == ' ') s++;
+        if (*s == ',') {
+            s++;
+            continue;
+        }
+        if (*s == ']') return n;
+        return -1;
+    }
+}
+
+/* Union of two tag arrays into out: a's tags in order, then each tag of b
+ * that a lacks. A tag that would not fit is left out. Falls back to a, or
+ * b, when the other is not a tag array. */
+static void tags_union(const char *a, const char *b, char *out, size_t cap) {
+    enum { TAGS_MAX = 256 };
+    const char *ta[TAGS_MAX], *tb[TAGS_MAX];
+    size_t la[TAGS_MAX], lb[TAGS_MAX];
+    int na = (a && *a) ? tags_tokens(a, ta, la, TAGS_MAX) : 0;
+    int nb = (b && *b) ? tags_tokens(b, tb, lb, TAGS_MAX) : 0;
+    size_t used;
+    int any = 0;
+    if (cap < 3) {
+        if (cap) out[0] = '\0';
+        return;
+    }
+    if (na < 0 || nb < 0) {
+        snprintf(out, cap, "%s", (a && *a) ? a : (b ? b : ""));
+        return;
+    }
+    out[0] = '[';
+    used = 1;
+    for (int pass = 0; pass < 2; pass++) {
+        const char **t = pass ? tb : ta;
+        size_t *l = pass ? lb : la;
+        int n = pass ? nb : na;
+        for (int i = 0; i < n; i++) {
+            int dup = 0;
+            for (int j = 0; j < na && pass && !dup; j++) dup = la[j] == l[i] && memcmp(ta[j], t[i], l[i]) == 0;
+            for (int j = 0; j < i && !dup; j++) dup = l[j] == l[i] && memcmp(t[j], t[i], l[i]) == 0;
+            if (dup || used + (any ? 1 : 0) + l[i] + 2 > cap) continue;
+            if (any) out[used++] = ',';
+            memcpy(out + used, t[i], l[i]);
+            used += l[i];
+            any = 1;
+        }
+    }
+    out[used++] = ']';
+    out[used] = '\0';
+    if (!any) out[0] = '\0';
+}
+
+/* tags_union() of two pool blobs. */
+static void blob_union(uint32_t ao, uint32_t al, uint32_t bo, uint32_t bl, char *out, size_t cap) {
+    char ta[MAX_TAGS_JSON], tb[MAX_TAGS_JSON];
+    ta[0] = tb[0] = '\0';
+    if (al && al < MAX_TAGS_JSON) {
+        memcpy(ta, str_pool.data + ao, al);
+        ta[al] = '\0';
+    }
+    if (bl && bl < MAX_TAGS_JSON) {
+        memcpy(tb, str_pool.data + bo, bl);
+        tb[bl] = '\0';
+    }
+    tags_union(ta, tb, out, cap);
+}
+
 /* Union two metadata records -> a deduped meta_idx covering both feeds.
  * Scalar fields are copied to locals + tags to a stack buffer BEFORE calling
  * add_meta_v4 (which may realloc meta_db, invalidating a/b). */
@@ -597,38 +783,35 @@ static uint32_t merge_meta(uint32_t a_idx, uint32_t b_idx) {
     builder_meta_v4_t *a;
     builder_meta_v4_t *b;
     uint8_t  conf;
+    uint8_t  conf_r;
     uint8_t  type;
     uint8_t  tlp;
     uint16_t cat;
     uint64_t feeds;
     char tagbuf[MAX_TAGS_JSON];
+    char labbuf[MAX_TAGS_JSON];
     if (a_idx == b_idx) return a_idx;
     if (a_idx >= meta_db.count || b_idx >= meta_db.count) return a_idx;
     a = &meta_db.items[a_idx];
     b = &meta_db.items[b_idx];
     conf = a->confidence > b->confidence ? a->confidence : b->confidence;
+    conf_r = a->confidence_r > b->confidence_r ? a->confidence_r : b->confidence_r;
     type = a->type_mask | b->type_mask;
     tlp = a->tlp_mask  | b->tlp_mask;
     cat = (uint16_t)(a->category_mask | b->category_mask);
     feeds = a->feed_mask | b->feed_mask;
-     tagbuf[0] = '\0';
-    if (a->tags_length && a->tags_length < MAX_TAGS_JSON) {
-        memcpy(tagbuf, str_pool.data + a->tags_offset, a->tags_length);
-        tagbuf[a->tags_length] = '\0';
-    } else if (b->tags_length && b->tags_length < MAX_TAGS_JSON) {
-        memcpy(tagbuf, str_pool.data + b->tags_offset, b->tags_length);
-        tagbuf[b->tags_length] = '\0';
-    }
-    return add_meta_v4(conf, type, tlp, cat, feeds, tagbuf);
+    blob_union(a->tags_offset, a->tags_length, b->tags_offset, b->tags_length, tagbuf, sizeof tagbuf);
+    blob_union(a->labels_offset, a->labels_length, b->labels_offset, b->labels_length, labbuf, sizeof labbuf);
+    return add_meta_raw(conf, conf_r, type, tlp, cat, feeds, tagbuf, labbuf);
 }
 
 /* Returns 1 if the caller should append a NEW IOC row; 0 if the IOC was a
  * duplicate (feed metadata merged into the existing row, no new row). */
-static int ioc_dedup_pre_add(uint64_t key, uint32_t meta_idx) {
+static int ioc_dedup_pre_add(uint64_t key, const delete_entry_t *id, uint32_t meta_idx) {
     ioc_dedup_entry_t *e;
     uint32_t *slot;
     if (!g_ioc_dedup_active) return 1;
-    e = ioc_dedup_find(key);
+    e = ioc_dedup_find(key, id);
     if (!e) return 1;
     slot = ioc_meta_slot(e->kind, e->index);
     if (slot) *slot = merge_meta(*slot, meta_idx);
@@ -666,8 +849,12 @@ static void add_ioc(const char* value, const char* type, uint32_t meta_idx) {
         uint32_t idx;
         builder_ipv6_t *e;
         if (ip.family == 4) {
+            delete_entry_t id = {0};
+            id.kind = DEL_KIND_IPV4;
+            id.v4_start = ip.v4_start;
+            id.v4_end = ip.v4_end;
             key = ioc_key_ipv4(ip.v4_start, ip.v4_end);
-            if (!ioc_dedup_pre_add(key, meta_idx)) return;
+            if (!ioc_dedup_pre_add(key, &id, meta_idx)) return;
             ensure_capacity();
             idx = (uint32_t)ip_db.count;
             ip_db.items[ip_db.count++] = (builder_ip_t){ ip.v4_start, ip.v4_end, meta_idx };
@@ -675,8 +862,14 @@ static void add_ioc(const char* value, const char* type, uint32_t meta_idx) {
             stats.ipv4_count++;
             return;
         }
-        key = ioc_key_ipv6(ip.v6_start, ip.v6_end);
-        if (!ioc_dedup_pre_add(key, meta_idx)) return;
+        {
+            delete_entry_t id = {0};
+            id.kind = DEL_KIND_IPV6;
+            memcpy(id.v6_start, ip.v6_start, 16);
+            memcpy(id.v6_end, ip.v6_end, 16);
+            key = ioc_key_ipv6(ip.v6_start, ip.v6_end);
+            if (!ioc_dedup_pre_add(key, &id, meta_idx)) return;
+        }
         ensure_capacity();
         idx = (uint32_t)ip6_db.count;
         e = &ip6_db.items[ip6_db.count];
@@ -704,7 +897,10 @@ static void add_ioc(const char* value, const char* type, uint32_t meta_idx) {
         size_t len;
         size_t offset;
         uint32_t idx;
-        if (!ioc_dedup_pre_add(key, meta_idx)) return;
+        delete_entry_t id = {0};
+        id.kind = DEL_KIND_STR;
+        id.str = (char *)value;
+        if (!ioc_dedup_pre_add(key, &id, meta_idx)) return;
         ensure_capacity();
         len = strlen(value);
         offset = str_pool.len;
@@ -734,8 +930,7 @@ static void emit_normalized_ioc_v4(normalized_ioc_v4_t *ioc) {
     if (!ioc || strlen(ioc->value) == 0) return;
 
     if (ioc->action == '-') {
-        uint64_t hash = thrt_hash(ioc->value);
-        delete_set_add(hash);
+        delete_set_add(ioc->value, ioc_type_is_ip(ioc->type));
         stats.deleted_count++;
         if (g_verbose) {
             printf("  [DELETE] %s\n", ioc->value);
@@ -2396,6 +2591,286 @@ static int cmp_ipv6(const void *a, const void *b) {
     return memcmp(ipA->start, ipB->start, 16);
 }
 
+/* ============================================================================
+ * DISJOINT RANGES
+ *
+ * The readers binary-search the sorted range arrays, which only works when no
+ * two ranges overlap. Feeds overlap all the time: a /24 from one blocklist
+ * contains a /32 from another, and the CMDB tags an address a CTI feed also
+ * lists. After sorting, overlapping ranges are cut at every boundary and each
+ * piece gets the merge of every range covering it. Adjacent pieces with the
+ * same record are joined again.
+ * ============================================================================ */
+typedef struct {
+    uint64_t pos;  /* start, or end + 1 (2^32 for the last address) */
+    uint32_t meta;
+    uint8_t open;
+} ev4_t;
+
+static int cmp_ev4(const void *a, const void *b) {
+    const ev4_t *x = (const ev4_t *)a, *y = (const ev4_t *)b;
+    return (x->pos > y->pos) - (x->pos < y->pos);
+}
+
+/* Active covering records: a multiset kept as a small array. */
+typedef struct {
+    uint32_t *items;
+    size_t count, cap;
+} active_t;
+
+static void active_add(active_t *a, uint32_t meta) {
+    if (a->count == a->cap) {
+        a->cap = a->cap ? a->cap * 2 : 16;
+        a->items = xrealloc(a->items, a->cap * sizeof(uint32_t));
+    }
+    a->items[a->count++] = meta;
+}
+
+static void active_del(active_t *a, uint32_t meta) {
+    for (size_t i = 0; i < a->count; i++) {
+        if (a->items[i] == meta) {
+            a->items[i] = a->items[--a->count];
+            return;
+        }
+    }
+}
+
+static uint32_t active_merge(const active_t *a) {
+    uint32_t m = a->items[0];
+    for (size_t i = 1; i < a->count; i++) m = merge_meta(m, a->items[i]);
+    return m;
+}
+
+static void flatten_ipv4(void) {
+    size_t n = ip_db.count, ne = 0, out_n = 0, out_cap;
+    uint32_t max_end;
+    int overlap = 0;
+    ev4_t *ev;
+    builder_ip_t *out;
+    active_t act = {0};
+
+    if (n < 2) return;
+    max_end = ip_db.items[0].end;
+    for (size_t i = 1; i < n && !overlap; i++) {
+        if (ip_db.items[i].start <= max_end) overlap = 1;
+        if (ip_db.items[i].end > max_end) max_end = ip_db.items[i].end;
+    }
+    if (!overlap) return;
+
+    ev = xmalloc(2 * n * sizeof(ev4_t));
+    for (size_t i = 0; i < n; i++) {
+        ev[ne++] = (ev4_t){ip_db.items[i].start, ip_db.items[i].meta_idx, 1};
+        ev[ne++] = (ev4_t){(uint64_t)ip_db.items[i].end + 1, ip_db.items[i].meta_idx, 0};
+    }
+    qsort(ev, ne, sizeof(ev4_t), cmp_ev4);
+
+    out_cap = n;
+    out = xmalloc(out_cap * sizeof(builder_ip_t));
+    for (size_t i = 0; i < ne;) {
+        uint64_t pos = ev[i].pos;
+        while (i < ne && ev[i].pos == pos) {
+            if (ev[i].open)
+                active_add(&act, ev[i].meta);
+            else
+                active_del(&act, ev[i].meta);
+            i++;
+        }
+        if (act.count > 0 && i < ne) {
+            uint32_t meta = active_merge(&act);
+            uint32_t s = (uint32_t)pos, e = (uint32_t)(ev[i].pos - 1);
+            if (out_n > 0 && out[out_n - 1].meta_idx == meta && (uint64_t)out[out_n - 1].end + 1 == pos) {
+                out[out_n - 1].end = e;
+            } else {
+                if (out_n == out_cap) {
+                    out_cap *= 2;
+                    out = xrealloc(out, out_cap * sizeof(builder_ip_t));
+                }
+                out[out_n++] = (builder_ip_t){s, e, meta};
+            }
+        }
+    }
+    free(act.items);
+    free(ev);
+    free(ip_db.items);
+    ip_db.items = out;
+    ip_db.count = out_n;
+    ip_db.cap = out_cap;
+}
+
+/* 128-bit positions, big-endian, with a 17th bit for the end + 1 of the
+ * last address. */
+typedef struct {
+    uint8_t pos[16];
+    uint8_t past_end;
+    uint8_t open;
+    uint32_t meta;
+} ev6_t;
+
+static int cmp_ev6(const void *a, const void *b) {
+    const ev6_t *x = (const ev6_t *)a, *y = (const ev6_t *)b;
+    if (x->past_end != y->past_end) return x->past_end ? 1 : -1;
+    return memcmp(x->pos, y->pos, 16);
+}
+
+static int ev6_same(const ev6_t *x, const ev6_t *y) {
+    return x->past_end == y->past_end && memcmp(x->pos, y->pos, 16) == 0;
+}
+
+static void v6_inc(const uint8_t *in, uint8_t *out, uint8_t *carry) {
+    int c = 1;
+    for (int k = 15; k >= 0; k--) {
+        int v = in[k] + c;
+        out[k] = (uint8_t)v;
+        c = v >> 8;
+    }
+    *carry = (uint8_t)c;
+}
+
+static void v6_dec(const ev6_t *p, uint8_t *out) {
+    if (p->past_end) {
+        memset(out, 0xFF, 16);
+        return;
+    }
+    memcpy(out, p->pos, 16);
+    for (int k = 15; k >= 0; k--) {
+        if (out[k]-- != 0) break;
+    }
+}
+
+static void flatten_ipv6(void) {
+    size_t n = ip6_db.count, ne = 0, out_n = 0, out_cap;
+    uint8_t max_end[16];
+    int overlap = 0;
+    ev6_t *ev;
+    builder_ipv6_t *out;
+    active_t act = {0};
+
+    if (n < 2) return;
+    memcpy(max_end, ip6_db.items[0].end, 16);
+    for (size_t i = 1; i < n && !overlap; i++) {
+        if (memcmp(ip6_db.items[i].start, max_end, 16) <= 0) overlap = 1;
+        if (memcmp(ip6_db.items[i].end, max_end, 16) > 0) memcpy(max_end, ip6_db.items[i].end, 16);
+    }
+    if (!overlap) return;
+
+    ev = xmalloc(2 * n * sizeof(ev6_t));
+    for (size_t i = 0; i < n; i++) {
+        ev6_t o = {{0}, 0, 1, ip6_db.items[i].meta_idx};
+        ev6_t c = {{0}, 0, 0, ip6_db.items[i].meta_idx};
+        memcpy(o.pos, ip6_db.items[i].start, 16);
+        v6_inc(ip6_db.items[i].end, c.pos, &c.past_end);
+        ev[ne++] = o;
+        ev[ne++] = c;
+    }
+    qsort(ev, ne, sizeof(ev6_t), cmp_ev6);
+
+    out_cap = n;
+    out = xmalloc(out_cap * sizeof(builder_ipv6_t));
+    for (size_t i = 0; i < ne;) {
+        size_t first = i;
+        while (i < ne && ev6_same(&ev[i], &ev[first])) {
+            if (ev[i].open)
+                active_add(&act, ev[i].meta);
+            else
+                active_del(&act, ev[i].meta);
+            i++;
+        }
+        if (act.count > 0 && i < ne) {
+            uint32_t meta = active_merge(&act);
+            uint8_t e[16];
+            v6_dec(&ev[i], e);
+            if (out_n > 0 && out[out_n - 1].meta_idx == meta) {
+                uint8_t nx[16], carry;
+                v6_inc(out[out_n - 1].end, nx, &carry);
+                if (!carry && memcmp(nx, ev[first].pos, 16) == 0) {
+                    memcpy(out[out_n - 1].end, e, 16);
+                    continue;
+                }
+            }
+            if (out_n == out_cap) {
+                out_cap *= 2;
+                out = xrealloc(out, out_cap * sizeof(builder_ipv6_t));
+            }
+            memcpy(out[out_n].start, ev[first].pos, 16);
+            memcpy(out[out_n].end, e, 16);
+            out[out_n].meta_idx = meta;
+            out_n++;
+        }
+    }
+    free(act.items);
+    free(ev);
+    free(ip6_db.items);
+    ip6_db.items = out;
+    ip6_db.count = out_n;
+    ip6_db.cap = out_cap;
+}
+
+/* The rows as declared, saved before flatten_*() rewrites ip_db/ip6_db.
+ * write_thrt() stores them so a fold reloads exact networks. */
+static builder_ip_t *g_src_v4 = NULL;
+static size_t g_src_v4_n = 0;
+static builder_ipv6_t *g_src_v6 = NULL;
+static size_t g_src_v6_n = 0;
+
+static void save_source_rows(void) {
+    free(g_src_v4);
+    free(g_src_v6);
+    g_src_v4 = NULL;
+    g_src_v6 = NULL;
+    g_src_v4_n = ip_db.count;
+    g_src_v6_n = ip6_db.count;
+    if (g_src_v4_n) {
+        g_src_v4 = xmalloc(g_src_v4_n * sizeof(builder_ip_t));
+        memcpy(g_src_v4, ip_db.items, g_src_v4_n * sizeof(builder_ip_t));
+    }
+    if (g_src_v6_n) {
+        g_src_v6 = xmalloc(g_src_v6_n * sizeof(builder_ipv6_t));
+        memcpy(g_src_v6, ip6_db.items, g_src_v6_n * sizeof(builder_ipv6_t));
+    }
+}
+
+static void free_source_rows(void) {
+    free(g_src_v4);
+    free(g_src_v6);
+    g_src_v4 = NULL;
+    g_src_v6 = NULL;
+    g_src_v4_n = g_src_v6_n = 0;
+}
+
+/* Drop metadata no row points at. Flattening and folds create merged
+ * records; without this, each fold would carry the ones it no longer
+ * uses into the next file. */
+static void compact_meta(void) {
+    uint32_t *remap;
+    size_t w = 0;
+    if (meta_db.count == 0) return;
+    remap = xmalloc(meta_db.count * sizeof(uint32_t));
+    for (size_t i = 0; i < meta_db.count; i++) remap[i] = UINT32_MAX;
+#define MARK(arr, n) for (size_t i = 0; i < (n); i++) remap[(arr)[i].meta_idx] = 0
+    MARK(ip_db.items, ip_db.count);
+    MARK(ip6_db.items, ip6_db.count);
+    MARK(str_db.items, str_db.count);
+    MARK(g_src_v4, g_src_v4_n);
+    MARK(g_src_v6, g_src_v6_n);
+#undef MARK
+    for (size_t i = 0; i < meta_db.count; i++) {
+        if (remap[i] == UINT32_MAX) continue;
+        meta_db.items[w] = meta_db.items[i];
+        remap[i] = (uint32_t)w++;
+    }
+    if (w != meta_db.count) {
+#define REMAP(arr, n) for (size_t i = 0; i < (n); i++) (arr)[i].meta_idx = remap[(arr)[i].meta_idx]
+        REMAP(ip_db.items, ip_db.count);
+        REMAP(ip6_db.items, ip6_db.count);
+        REMAP(str_db.items, str_db.count);
+        REMAP(g_src_v4, g_src_v4_n);
+        REMAP(g_src_v6, g_src_v6_n);
+#undef REMAP
+        meta_db.count = w;
+    }
+    free(remap);
+}
+
 static void build_ip_accel(void) {
     memset(ip_accel_db, 0, sizeof(ip_accel_db));
     for (size_t i = 0; i < ip_db.count; i++) {
@@ -2413,7 +2888,7 @@ static void build_bloom(void) {
     for (size_t i = 0; i < str_db.count; i++) {
         uint64_t h = str_db.items[i].hash;
         uint32_t h1 = (uint32_t)h;
-        uint32_t h2 = (uint32_t)((h >> 32) | (h << 32));
+        uint32_t h2 = thrt_bloom_h2(h1);
         for (int k = 0; k < 3; k++) {
             uint32_t bit_idx = (h1 + k * h2) % bloom_size_bits;
             bloom_filter[bit_idx / 8] |= (1 << (bit_idx & 7));
@@ -2529,15 +3004,22 @@ static void load_existing_thrt(const char *filename) {
         exit(1);
     }
 
-    fstat(fd, &sb);
+    if (fstat(fd, &sb) != 0 || sb.st_size < (off_t)sizeof(thrt_header_t)) {
+        fprintf(stderr, "%s Existing DB %s is not a .thrt. Build a fresh one first.\n", ICON_WARN, filename);
+        close(fd);
+        exit(1);
+    }
     map = mmap(NULL, sb.st_size, PROT_READ, MAP_SHARED, fd, 0);
     if (map == MAP_FAILED) { perror("mmap"); close(fd); exit(1); }
 
     hdr = (thrt_header_t*)map;
-    if (hdr->magic != THRT_MAGIC || hdr->version < THRT_VERSION) {
-        fprintf(stderr, "%s Existing DB is v%d - v%d required. Build a fresh V4 first.\n",
-                ICON_WARN, hdr->version, THRT_VERSION);
-        munmap(map, sb.st_size); close(fd); exit(1);
+    {
+        char why[512];
+        if (thrt_validate((const unsigned char *)map, (size_t)sb.st_size, filename, why, sizeof why) !=
+            THRT_VALID_OK) {
+            fprintf(stderr, "%s %s. Build a fresh one first.\n", ICON_WARN, why);
+            munmap(map, sb.st_size); close(fd); exit(1);
+        }
     }
 
     base = (char*)map;
@@ -2555,35 +3037,59 @@ static void load_existing_thrt(const char *filename) {
         }
     }
 
+    g_public_feeds |= hdr->public_feed_mask;
+
     /* Import metadata entries (direct copy, preserving indices) */
     for (uint32_t i = 0; i < hdr->metadata_count; i++) {
-        ensure_capacity();
-        meta_db.items[meta_db.count++] = (builder_meta_v4_t){
+        builder_meta_v4_t m = {
             .confidence    = meta[i].confidence,
+            .confidence_r  = meta[i].confidence_r,
             .type_mask     = meta[i].type_mask,
             .tlp_mask      = meta[i].tlp_mask,
             .category_mask = meta[i].category_mask,
             .feed_mask     = meta[i].feed_mask,
-            .tags_offset   = 0, /* Re-import tags below */
-            .tags_length   = 0
+            .tags_offset   = 0, /* Re-import tags and labels below */
+            .tags_length   = 0,
+            .labels_offset = 0,
+            .labels_length = 0
         };
+        ensure_capacity();
+        meta_db.items[meta_db.count++] = m;
 
-        /* Re-import tags into our string pool */
+        /* Re-import tags and labels into our string pool */
         if (meta[i].tags_offset > 0 && meta[i].tags_length > 0) {
             uint32_t new_offset;
             ensure_capacity();
             new_offset = str_pool.len;
             memcpy(str_pool.data + new_offset, str_base + meta[i].tags_offset, meta[i].tags_length);
             str_pool.len += meta[i].tags_length;
-            /* Null-terminate */
             str_pool.data[str_pool.len++] = '\0';
             meta_db.items[i].tags_offset = new_offset;
             meta_db.items[i].tags_length = meta[i].tags_length;
         }
+        if (meta[i].labels_offset > 0 && meta[i].labels_length > 0) {
+            uint32_t new_offset;
+            ensure_capacity();
+            new_offset = str_pool.len;
+            memcpy(str_pool.data + new_offset, str_base + meta[i].labels_offset, meta[i].labels_length);
+            str_pool.len += meta[i].labels_length;
+            str_pool.data[str_pool.len++] = '\0';
+            meta_db.items[i].labels_offset = new_offset;
+            meta_db.items[i].labels_length = meta[i].labels_length;
+        }
     }
 
-    /* Import IPv4 ranges */
-    for (uint32_t i = 0; i < hdr->ipv4_range_count; i++) {
+    /* Import the declared address rows, not the disjoint lookup pieces:
+     * a fold merges, withdraws and evicts exact networks. */
+    (void)ipv4;
+    (void)ipv6;
+    ipv4 = (thrt_ipv4_range_t*)(base + hdr->offset_src_ipv4);
+    ipv6 = (thrt_ipv6_range_t*)(base + hdr->offset_src_ipv6);
+    for (uint32_t i = 0; i < hdr->src_ipv4_count; i++) {
+        if (ipv4[i].meta_idx >= hdr->metadata_count) {
+            fprintf(stderr, "%s Existing DB %s is corrupt (IPv4 row %u)\n", ICON_WARN, filename, i);
+            exit(1);
+        }
         ensure_capacity();
         ip_db.items[ip_db.count++] = (builder_ip_t){
             .start = ipv4[i].ip_start,
@@ -2591,10 +3097,12 @@ static void load_existing_thrt(const char *filename) {
             .meta_idx = ipv4[i].meta_idx
         };
     }
-
-    /* Import IPv6 ranges */
-    for (uint32_t i = 0; i < hdr->ipv6_range_count; i++) {
+    for (uint32_t i = 0; i < hdr->src_ipv6_count; i++) {
         builder_ipv6_t *e;
+        if (ipv6[i].meta_idx >= hdr->metadata_count) {
+            fprintf(stderr, "%s Existing DB %s is corrupt (IPv6 row %u)\n", ICON_WARN, filename, i);
+            exit(1);
+        }
         ensure_capacity();
         e = &ip6_db.items[ip6_db.count++];
         memcpy(e->start, ipv6[i].ip_start, 16);
@@ -2643,6 +3151,7 @@ static void load_existing_thrt(const char *filename) {
 static void apply_delete_set(void) {
     size_t orig;
     size_t w;
+    delete_entry_t probe;
 
     if (!g_delete_set || g_delete_set->count == 0)
         return;
@@ -2650,10 +3159,12 @@ static void apply_delete_set(void) {
     orig = ip_db.count;
     w = 0;
     for (size_t i = 0; i < ip_db.count; i++) {
-        char buf[INET_ADDRSTRLEN];
-        uint32_t ip_net = htonl(ip_db.items[i].start);
-        inet_ntop(AF_INET, &ip_net, buf, sizeof(buf));
-        if (!delete_set_contains(thrt_hash(buf)))
+        memset(&probe, 0, sizeof probe);
+        probe.kind = DEL_KIND_IPV4;
+        probe.v4_start = ip_db.items[i].start;
+        probe.v4_end = ip_db.items[i].end;
+        probe.key = ioc_key_ipv4(probe.v4_start, probe.v4_end);
+        if (!delete_set_has(&probe))
             ip_db.items[w++] = ip_db.items[i];
     }
     if (g_verbose && w < orig)
@@ -2663,9 +3174,12 @@ static void apply_delete_set(void) {
     orig = ip6_db.count;
     w = 0;
     for (size_t i = 0; i < ip6_db.count; i++) {
-        char buf[INET6_ADDRSTRLEN];
-        inet_ntop(AF_INET6, ip6_db.items[i].start, buf, sizeof(buf));
-        if (!delete_set_contains(thrt_hash(buf)))
+        memset(&probe, 0, sizeof probe);
+        probe.kind = DEL_KIND_IPV6;
+        memcpy(probe.v6_start, ip6_db.items[i].start, 16);
+        memcpy(probe.v6_end, ip6_db.items[i].end, 16);
+        probe.key = ioc_key_ipv6(probe.v6_start, probe.v6_end);
+        if (!delete_set_has(&probe))
             ip6_db.items[w++] = ip6_db.items[i];
     }
     if (g_verbose && w < orig)
@@ -2675,7 +3189,11 @@ static void apply_delete_set(void) {
     orig = str_db.count;
     w = 0;
     for (size_t i = 0; i < str_db.count; i++) {
-        if (!delete_set_contains(str_db.items[i].hash))
+        memset(&probe, 0, sizeof probe);
+        probe.kind = DEL_KIND_STR;
+        probe.str = str_pool.data + str_db.items[i].offset;
+        probe.key = ioc_key_str(str_db.items[i].hash);
+        if (!delete_set_has(&probe))
             str_db.items[w++] = str_db.items[i];
     }
     if (g_verbose && w < orig)
@@ -2698,6 +3216,10 @@ static void write_thrt(const char *filename) {
     /* Sort arrays */
     if (ip_db.count > 0) qsort(ip_db.items, ip_db.count, sizeof(builder_ip_t), cmp_ip);
     if (ip6_db.count > 0) qsort(ip6_db.items, ip6_db.count, sizeof(builder_ipv6_t), cmp_ipv6);
+    save_source_rows();
+    flatten_ipv4();
+    flatten_ipv6();
+    compact_meta();
 
     build_ip_accel();
     build_bloom();
@@ -2748,7 +3270,11 @@ static void write_thrt(const char *filename) {
     hdr.offset_ip_accel = offset;  offset += sizeof(ip_accel_db);
     hdr.offset_bloom = offset;     offset += (bloom_size_bits / 8);
     hdr.offset_feeds = offset;     offset += feed_db.count * sizeof(thrt_feed_entry_t);
-    hdr.offset_sources = offset;   /* Legacy compat - same as feeds for now */
+    hdr.public_feed_mask = g_public_feeds;
+    hdr.offset_src_ipv4 = offset;  offset += g_src_v4_n * sizeof(thrt_ipv4_range_t);
+    hdr.offset_src_ipv6 = offset;  offset += g_src_v6_n * sizeof(thrt_ipv6_range_t);
+    hdr.src_ipv4_count = (uint32_t)g_src_v4_n;
+    hdr.src_ipv6_count = (uint32_t)g_src_v6_n;
     hdr.total_size = offset;
 
     /* Write header */
@@ -2760,12 +3286,14 @@ static void write_thrt(const char *filename) {
             .confidence = meta_db.items[i].confidence,
             .type_mask = meta_db.items[i].type_mask,
             .tlp_mask = meta_db.items[i].tlp_mask,
-            .pad1 = 0,
+            .confidence_r = meta_db.items[i].confidence_r,
             .category_mask = meta_db.items[i].category_mask,
             .pad2 = 0,
             .feed_mask = meta_db.items[i].feed_mask,
             .tags_offset = meta_db.items[i].tags_offset,
-            .tags_length = meta_db.items[i].tags_length
+            .tags_length = meta_db.items[i].tags_length,
+            .labels_offset = meta_db.items[i].labels_offset,
+            .labels_length = meta_db.items[i].labels_length
         };
         fwrite(&m, sizeof(m), 1, f);
     }
@@ -2807,13 +3335,39 @@ static void write_thrt(const char *filename) {
         fwrite(&fe, sizeof(fe), 1, f);
     }
 
+    /* Write the declared address rows */
+    for (size_t i = 0; i < g_src_v4_n; i++) {
+        thrt_ipv4_range_t r = {g_src_v4[i].start, g_src_v4[i].end, g_src_v4[i].meta_idx, 0};
+        fwrite(&r, sizeof(r), 1, f);
+    }
+    for (size_t i = 0; i < g_src_v6_n; i++) {
+        thrt_ipv6_range_t r;
+        memcpy(r.ip_start, g_src_v6[i].start, 16);
+        memcpy(r.ip_end, g_src_v6[i].end, 16);
+        r.meta_idx = g_src_v6[i].meta_idx;
+        r.pad = 0;
+        fwrite(&r, sizeof(r), 1, f);
+    }
+    free_source_rows();
+
     /* Compute and write checksum */
     fflush(f);
     checksum = compute_file_checksum(f, hdr.checksum_offset);
     fseek(f, hdr.checksum_offset, SEEK_SET);
     fwrite(&checksum, sizeof(checksum), 1, f);
 
-    fclose(f);
+    /* A short write (a full disk) must not be renamed over the live file. */
+    if (ferror(f) || fflush(f) != 0 || fsync(fileno(f)) != 0 || ftell(f) < 0) {
+        fprintf(stderr, "%s Failed to write %s: %s\n", ICON_WARN, tmp_filename, strerror(errno));
+        fclose(f);
+        unlink(tmp_filename);
+        exit(1);
+    }
+    if (fclose(f) != 0) {
+        fprintf(stderr, "%s Failed to close %s: %s\n", ICON_WARN, tmp_filename, strerror(errno));
+        unlink(tmp_filename);
+        exit(1);
+    }
     free(ht);
     free(bloom_filter);
 
@@ -2892,6 +3446,7 @@ static void builder_state_reset(void) {
     /* stats + layer */
     memset(&stats, 0, sizeof(stats));
     g_current_layer = LAYER_CTI;
+    g_public_feeds = 0;
     snprintf(g_default_source, sizeof(g_default_source), "%s", "Unknown");
     str_pool_reserve_sentinel();
 }
@@ -3113,12 +3668,24 @@ static void compact_str_pool(void) {
     for (size_t i = 0; i < meta_db.count; i++) {
         builder_meta_v4_t *m = &meta_db.items[i];
         uint32_t off;
-        if (m->tags_length == 0) { m->tags_offset = 0; continue; }
-        off = (uint32_t)np.len;
-        memcpy(np.data + np.len, str_pool.data + m->tags_offset, m->tags_length);
-        np.len += m->tags_length;
-        np.data[np.len++] = '\0';
-        m->tags_offset = off;
+        if (m->tags_length == 0) {
+            m->tags_offset = 0;
+        } else {
+            off = (uint32_t)np.len;
+            memcpy(np.data + np.len, str_pool.data + m->tags_offset, m->tags_length);
+            np.len += m->tags_length;
+            np.data[np.len++] = '\0';
+            m->tags_offset = off;
+        }
+        if (m->labels_length == 0) {
+            m->labels_offset = 0;
+        } else {
+            off = (uint32_t)np.len;
+            memcpy(np.data + np.len, str_pool.data + m->labels_offset, m->labels_length);
+            np.len += m->labels_length;
+            np.data[np.len++] = '\0';
+            m->labels_offset = off;
+        }
     }
     /* Live string IOC values */
     for (size_t i = 0; i < str_db.count; i++) {
@@ -3148,8 +3715,8 @@ static void rebuild_meta_dedup(void) {
     }
     for (size_t i = 0; i < meta_db.count; i++) {
         builder_meta_v4_t *m = &meta_db.items[i];
-        char tagbuf[MAX_TAGS_JSON];
-        const char *tags = "";
+        char tagbuf[MAX_TAGS_JSON], labbuf[MAX_TAGS_JSON];
+        const char *tags = "", *labels = "";
         uint64_t key;
         uint32_t bkt;
         meta_dedup_entry_t *ent;
@@ -3158,8 +3725,13 @@ static void rebuild_meta_dedup(void) {
             tagbuf[m->tags_length] = '\0';
             tags = tagbuf;
         }
-        key = meta_make_key(m->confidence, m->type_mask, m->tlp_mask,
-                                     m->category_mask, m->feed_mask, tags);
+        if (m->labels_length && m->labels_length < MAX_TAGS_JSON) {
+            memcpy(labbuf, str_pool.data + m->labels_offset, m->labels_length);
+            labbuf[m->labels_length] = '\0';
+            labels = labbuf;
+        }
+        key = meta_make_key(m->confidence, m->confidence_r, m->type_mask, m->tlp_mask,
+                            m->category_mask, m->feed_mask, tags, labels);
         bkt = (uint32_t)(key % META_DEDUP_BUCKETS);
         ent = malloc(sizeof(*ent));
         if (!ent) { fprintf(stderr, "FATAL: Out of Memory (meta dedup rebuild)\n"); exit(1); }
@@ -3255,10 +3827,10 @@ static size_t feed_snapshot_evict(const char *feed_key) {
 /* ============================================================================
  * PER-FEED GENERATION COMPANION FILE  (<out.thrt>.gen)
  *
- * Per-IOC expiry/generation cannot live in the V4 .thrt (the 24B
- * thrt_metadata_t is full; per-IOC TTL would be a V5 ABI bump), so generation
- * and last-update live in a tiny TEXT file next to the .thrt, never in the
- * header, and cost no ABI change. It powers:
+ * Per-IOC expiry/generation does not live in the .thrt (the 24-byte
+ * thrt_metadata_t is shared by every IOC with the same fields and has no
+ * room), so generation and last-update live in a tiny TEXT file next to the
+ * .thrt, never in the header. It powers:
  *   - anti-resurrection: a snapshot carrying a generation <= the stored one is
  *     dropped (a re-delivered/out-of-order snapshot can't resurrect withdrawn
  *     IOCs).
@@ -3363,10 +3935,9 @@ static void gen_free(void) {
  * A page that withdraws an indicator applies that delete before the next
  * page, then rebuilds dedup, so a later page can add the same value back.
  *
- * TTL: per-IOC expiry is NOT persisted in .thrt (the V4 thrt_metadata_t is a
- * full 24B dedup-shared record; per-IOC expiry would need a V5 ABI bump and a
- * matching reader change). ttl_days only prunes expired entries at fold time,
- * before the write; it is not stored as a per-IOC field.
+ * TTL: per-IOC expiry is NOT persisted in .thrt (thrt_metadata_t is a full
+ * 24-byte record shared across IOCs). ttl_days only prunes expired entries at
+ * fold time, before the write; it is not stored as a per-IOC field.
  * ============================================================================ */
 static int g_fold_active = 0;
 static char g_fold_out[PATH_MAX];
@@ -3722,6 +4293,12 @@ int main(int argc, char **argv) {
         load_existing_thrt(thrt_out);
     }
 
+    /* One row per indicator: the same value from several feeds or layers
+     * merges into one record, so a lookup sees every layer. */
+    ioc_dedup_reset();
+    if (g_incremental) ioc_dedup_seed();
+    g_ioc_dedup_active = 1;
+
     /* Process remaining arguments as files, respecting -l switches */
     /* Re-parse argv to handle interleaved -l options */
     g_current_layer = LAYER_CTI; /* Reset to default */
@@ -3755,7 +4332,9 @@ int main(int argc, char **argv) {
         process_file(argv[i]);
     }
 
+    g_ioc_dedup_active = 0;
     write_thrt(thrt_out);
+    ioc_dedup_reset();
 
     /* Cleanup */
     free(meta_db.items);
