@@ -1,0 +1,6 @@
+{
+  "output": "build/api/second.thrt",
+  "feeds": [
+    {"name": "pub", "type": "csv", "layer": "cti", "path": "testdata/api/second.csv"}
+  ]
+}

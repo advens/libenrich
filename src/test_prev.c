@@ -27,12 +27,16 @@ static int g_fail = 0;
 
 /* Mirror of the collector writer's insert: place (key,count,edges,sources) into
  * the open-addressing table. Returns 0 on success, -1 if the table is full. */
-static int prev_insert(
-    prev_entry_t* table, uint32_t slots, const char* key, uint32_t count, uint16_t edges, uint16_t sources) {
-    uint64_t hash = prev_hash(key);
+static int prev_insert(const prev_header_t* h,
+                       prev_entry_t* table,
+                       uint32_t slots,
+                       const char* key,
+                       uint32_t count,
+                       uint16_t edges,
+                       uint16_t sources) {
+    uint64_t hash = prev_hash(h->sip_key, key);
     uint32_t mask;
     uint32_t idx;
-    if (hash == 0) hash = 1;
     mask = slots - 1;
     idx = (uint32_t)hash & mask;
     for (uint32_t probes = 0; probes < slots; probes++) {
@@ -65,6 +69,8 @@ static void* build_table(uint32_t slots, size_t* out_len) {
     h->epoch = 0;
     h->offset_entries = sizeof(prev_header_t);
     h->count_max = 0;
+    h->sip_key[0] = 0x0706050403020100ULL;
+    h->sip_key[1] = 0x0f0e0d0c0b0a0908ULL;
     *out_len = total;
     return base;
 }
@@ -99,12 +105,12 @@ static int conformance(const char* path) {
     if (t) {
         uint16_t e = 0, s = 0;
         const prev_header_t* hh;
-        CHECK(prev_lookup(t, slots, "www.google.com", &e, &s) == 50000 && e == 7 && s == 120, "conf: google");
-        CHECK(prev_lookup(t, slots, "cdn.cloudflare.net", &e, &s) == 41000 && e == 7 && s == 95, "conf: cloudflare");
-        CHECK(prev_lookup(t, slots, "one.one.one.one", &e, &s) == 12000 && e == 6 && s == 60, "conf: quad-one");
-        CHECK(prev_lookup(t, slots, "internal.corp.lan", &e, &s) == 800 && e == 3 && s == 12, "conf: internal");
-        CHECK(prev_lookup(t, slots, "lonely-beacon.example", &e, &s) == 2 && e == 1 && s == 1, "conf: rare");
-        CHECK(prev_lookup(t, slots, "never-seen.invalid", &e, &s) == 0 && s == 0, "conf: absent => 0");
+        CHECK(prev_lookup((const prev_header_t*)buf, t, slots, "www.google.com", &e, &s) == 50000 && e == 7 && s == 120, "conf: google");
+        CHECK(prev_lookup((const prev_header_t*)buf, t, slots, "cdn.cloudflare.net", &e, &s) == 41000 && e == 7 && s == 95, "conf: cloudflare");
+        CHECK(prev_lookup((const prev_header_t*)buf, t, slots, "one.one.one.one", &e, &s) == 12000 && e == 6 && s == 60, "conf: quad-one");
+        CHECK(prev_lookup((const prev_header_t*)buf, t, slots, "internal.corp.lan", &e, &s) == 800 && e == 3 && s == 12, "conf: internal");
+        CHECK(prev_lookup((const prev_header_t*)buf, t, slots, "lonely-beacon.example", &e, &s) == 2 && e == 1 && s == 1, "conf: rare");
+        CHECK(prev_lookup((const prev_header_t*)buf, t, slots, "never-seen.invalid", &e, &s) == 0 && s == 0, "conf: absent => 0");
         hh = (const prev_header_t*)buf;
         CHECK(hh->entry_count == 5, "conf: entry_count");
         CHECK(hh->count_max == 50000, "conf: count_max");
@@ -141,13 +147,25 @@ int main(int argc, char** argv) {
     };
     uint16_t edges = 0xFFFF, srcs = 0xFFFF;
     if (argc > 1) return conformance(argv[1]);
+
+    /* SipHash against the published SipHash-2-4 vector (key 00..0f, the
+     * 15 bytes 00..0e), then the 1-3 variant the table uses. */
+    {
+        uint8_t msg[15];
+        uint64_t k0 = 0x0706050403020100ULL, k1 = 0x0f0e0d0c0b0a0908ULL, other[2] = {1, 2};
+        for (int i = 0; i < 15; i++) msg[i] = (uint8_t)i;
+        CHECK(prev_siphash(k0, k1, msg, 15, 2, 4) == 0xa129ca6149be45e5ULL, "SipHash-2-4 reference vector");
+        CHECK(prev_siphash(k0, k1, msg, 15, 1, 3) == 0xd320d86d2a519956ULL, "SipHash-1-3, as prev_write.py");
+        CHECK(prev_hash(other, "www.google.com") != prev_hash((const uint64_t[2]){k0, k1}, "www.google.com"),
+              "the key changes the hash");
+    }
     len = 0;
     base = build_table(1024, &len);
     h = (prev_header_t*)base;
     tbl = (prev_entry_t*)((uint8_t*)base + h->offset_entries);
 
     for (size_t i = 0; i < sizeof(seed) / sizeof(seed[0]); i++) {
-        CHECK(prev_insert(tbl, h->hash_slots, seed[i].k, seed[i].c, seed[i].e, seed[i].s) == 0, "insert");
+        CHECK(prev_insert(h, tbl, h->hash_slots, seed[i].k, seed[i].c, seed[i].e, seed[i].s) == 0, "insert");
         h->entry_count++;
         if (seed[i].c > h->count_max) h->count_max = seed[i].c;
     }
@@ -160,23 +178,23 @@ int main(int argc, char** argv) {
     CHECK(mapped == tbl, "entry array offset resolves");
 
     /* hits return the stored count + edge spread + source spread */
-    CHECK(prev_lookup(mapped, slots, "www.google.com", &edges, &srcs) == 50000, "common hit count");
+    CHECK(prev_lookup(h, mapped, slots, "www.google.com", &edges, &srcs) == 50000, "common hit count");
     CHECK(edges == 7, "common hit edge spread");
     CHECK(srcs == 120, "common hit source spread");
-    CHECK(prev_lookup(mapped, slots, "lonely-beacon.example", &edges, &srcs) == 2, "rare-present hit");
+    CHECK(prev_lookup(h, mapped, slots, "lonely-beacon.example", &edges, &srcs) == 2, "rare-present hit");
     CHECK(edges == 1, "rare-present edge spread");
     CHECK(srcs == 1, "rare-present source spread (one source)");
 
     /* absent keys => 0 (= rarest / first-seen) */
-    CHECK(prev_lookup(mapped, slots, "brand-new-c2-domain.xyz", &edges, &srcs) == 0, "absent => 0");
+    CHECK(prev_lookup(h, mapped, slots, "brand-new-c2-domain.xyz", &edges, &srcs) == 0, "absent => 0");
     CHECK(edges == 0, "absent edge spread 0");
     CHECK(srcs == 0, "absent source spread 0");
-    CHECK(prev_lookup(mapped, slots, "", &edges, &srcs) == 0, "empty key => 0");
-    CHECK(prev_lookup(mapped, slots, "www.google.co", NULL, NULL) == 0, "near-miss (prefix) => 0");
+    CHECK(prev_lookup(h, mapped, slots, "", &edges, &srcs) == 0, "empty key => 0");
+    CHECK(prev_lookup(h, mapped, slots, "www.google.co", NULL, NULL) == 0, "near-miss (prefix) => 0");
 
     /* NULL / zero-slot guards */
-    CHECK(prev_lookup(NULL, slots, "x", NULL, NULL) == 0, "NULL table guard");
-    CHECK(prev_lookup(mapped, 0, "x", NULL, NULL) == 0, "zero-slot guard");
+    CHECK(prev_lookup(h, NULL, slots, "x", NULL, NULL) == 0, "NULL table guard");
+    CHECK(prev_lookup(h, mapped, 0, "x", NULL, NULL) == 0, "zero-slot guard");
 
     /* corruption rejection */
     s2 = 0;

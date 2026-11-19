@@ -21,10 +21,10 @@ on one arch is incomplete.
 
 ## In
 
-`src/enrich.h`, `src/enrich_cmd.c`, `src/enrich_version.c`,
-`src/thrtutil.c`, `src/thrt_cli.c`, `src/overlay_tool.c`,
-`src/prev_lookup.c`, the format headers, the tests, `Makefile`,
-`docs/`.
+`src/enrich.h`, `src/enrich_lib.c`, `src/enrich_cmd.c`,
+`src/enrich_version.c`, `src/thrtutil.c`, `src/thrt_cli.c`,
+`src/overlay_tool.c`, `src/prev_lookup.c`, the format headers, the
+tests and `src/fuzz_enrich.c`, `testdata/`, `Makefile`, `docs/`.
 
 ## Not in
 
@@ -39,9 +39,9 @@ config do not land here.
 - Paste the command and its output. Do not claim tests passed without
   that paste.
 - Format version and SONAME are frozen. Bumping them is a human
-  decision (`Contract: abi|format`). The SONAME stays
-  `libenrich.so.0` for the 0.1 line. `LIB_PATCH` in the Makefile and
-  `enrich_version()` move together. `ENRICH_VERSION_PATCH` in
+  decision (`Contract: abi|format`). The SONAME is
+  `libenrich.so.<LIB_MAJOR>`. `LIB_MAJOR`, `LIB_MINOR`, `LIB_PATCH` in
+  the Makefile and `enrich_version()` move together. `ENRICH_VERSION_PATCH` in
   `enrich.h` is not the published version.
 
 ## Never

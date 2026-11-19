@@ -1,0 +1,8 @@
+ip,198.51.100.10,80,scanner,pubfeed,green
+domain,evil.example,70,malware,pubfeed,amber
+ip,10.1.2.3,60,c2,pubfeed,green
+ip,2001:db8::5,75,botnet,pubfeed,green
+domain,wl.example,90,c2,pubfeed,red
+domain,soft.example,65,c2,pubfeed,green
+ip,198.51.100.0/24,50,scanner,pubfeed,clear
+ip,2001:db8::/48,40,botnet,pubfeed,clear

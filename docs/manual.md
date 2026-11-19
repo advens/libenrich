@@ -361,6 +361,21 @@ for that fold.
 `layer` is `cti` (public) or `cti_r` (restricted). Omitted means `cti`,
 except `tags`, which defaults to the context layer.
 
+One indicator is one record, whatever feeds and layers list it. The
+same address, network or string from several files merges into one
+row. A network that contains another indicator is cut so that each
+address answers with the merge of every row that covers it. In that
+record, confidence, TLP, categories and feed names describe the public
+layer only. A restricted source adds its layer and its own score,
+never a feed name, a marking, a category or a label. `lookup` prints
+that score on a `Restricted` line. The labels a public source attaches
+(MISP tags, STIX labels) print on a `Labels` line, apart from the
+context `Tags`. Two sources that tag one indicator keep both sets.
+
+An address is four decimal octets (no leading zero) or an IPv6
+address without a `%zone`, read the same way on every platform.
+Anything else is a string.
+
 CSV, no header required. Columns are type, value, confidence, category,
 feed, tlp:
 
@@ -420,9 +435,18 @@ Not a layer of the threat database. `path` is the JSON. `dest` is the
 ```
 
 `action` is `whitelist` (also `suppress` or `-`), `tag` (also `T`), or
-anything else, which means add. `enrich build` writes `dest` and prints
-the entry count. There is no `enrich` subcommand that queries an
-overlay.
+anything else, which means add. A whitelist hides the indicator
+entirely; with `"suppress_mode":"score"` it is only flagged. A tag
+entry carries `"tags":["...", "..."]`. An add entry takes `confidence`
+and `category`. An `ioc` longer than 4096 bytes, or listed twice, is
+an error. `enrich build` writes `dest` (temporary file, then rename)
+and prints the entry count. There is no `enrich` subcommand that
+queries an overlay.
+
+The file stores each value, and a lookup compares it. An overlay
+written before format version 2 matched on a 32-bit hash alone, so an
+unrelated value with the same hash hit the entry. Those files are
+refused; rebuild them.
 
 ## GeoIP
 
@@ -567,7 +591,7 @@ The other rows, checked by the script:
 | 203.0.113.83 | indicators.stix.json | CTI, TLP AMBER, tag `tlp:amber+strict` |
 | 203.0.113.87 | indicators.stix.json | CTI, TLP GREEN. Custom marking in the bundle. |
 | 203.0.113.78 | sco.stix.json | CTI, confidence 50, TLP AMBER, feed `sco` |
-| 203.0.113.79 | private.stix.json | CTI_R, TLP RED, feed `private` |
+| 203.0.113.79 | private.stix.json | CTI_R. `lookup` prints its score, not its TLP or feed. |
 | d41d8cd98f00b204e9800998ecf8427e | indicators.stix.json | CTI. Hex literal `h'd41d8cd9...'`, MD5. |
 
 Rows the script requires to miss:
@@ -594,14 +618,68 @@ After the two folds:
 The overlay write prints:
 
 ```
-wrote build/docs/allow.ovly (68 bytes, 1 entries)
+wrote build/docs/allow.ovly (90 bytes, 1 entries)
   WHITELIST 203.0.113.59  hash=0xa613971f  action='-'
 ```
+
+## Library
+
+`enrich.h` is the lookup API that `lookup` uses. A log enricher or a
+lookup service opens the database, the overlay and a prevalence table
+as one snapshot, and looks values up under the rules above.
+
+```c
+enrich_options_t o = {sizeof o, "/var/lib/enrich/threat.thrt",
+                      "/var/lib/enrich/allow.ovly", NULL, ENRICH_OPT_SKIP_PRIVATE};
+enrich_t *e;
+char err[256];
+if (enrich_open(&e, &o, err, sizeof err) != ENRICH_OK) { /* err names the file */ }
+
+enrich_reader_t *r = enrich_reader_new(e);      /* one per thread */
+const enrich_snap_t *s = enrich_reader_enter(r);
+enrich_result_t res;
+if (enrich_lookup(s, enrich_lookup_flags(e), "203.0.113.50", 12, &res) == 1) {
+    /* res.flags, res.confidence, res.feed_mask, res.tags ... */
+}
+enrich_reader_leave(r);
+
+enrich_reload(e, NULL, err, sizeof err);         /* after a rebuild */
+```
+
+Every file is validated before it is published: version, sizes, every
+table offset and index, and the CRC32C. A file that fails keeps the
+previous snapshot. `enrich_reload()` loads only the files whose inode,
+size or mtime changed, and readers never wait for it. A reader holds
+its snapshot until it leaves or enters again; a replaced snapshot is
+unmapped once every reader has moved on. Replace files by rename, as
+`enrich` does: a file rewritten in place under a live mapping can
+fault.
+
+The order of a lookup: the overlay first (a full whitelist ends it),
+then the database. `ENRICH_OPT_SKIP_PRIVATE` drops the CTI parts of a
+private, loopback, link-local, CGNAT or ULA address and keeps its
+tags. Values are taken with their length, are never truncated, and
+are refused past 4096 bytes. `enrich_lookup_batch()` takes many values
+at once and prefetches the bloom filter. `enrich_event_fold()` sums the
+fields of one event. `enrich_prevalence()` reads a `.prev`.
+
+The library reads `.thrt` version 5, overlay version 2 and `.prev`
+version 3, and refuses any other version. `enrich_open()` takes any
+non-empty subset of the three paths; a rule engine can open the
+`.prev` alone.
+
+`make test` runs `src/test_enrich_api.c` against `testdata/api`.
+`make sanitize` runs it under AddressSanitizer, UndefinedBehaviorSanitizer
+and ThreadSanitizer. `make fuzz` builds the libFuzzer harness
+`src/fuzz_enrich.c` (needs a clang with libFuzzer).
 
 ## Not built here
 
 A prevalence table (`.prev`) is not a feed. This tool does not download
-one and does not compile one.
+one and does not compile one. Its rows are 64-bit SipHash-1-3 values
+under a random key stored in the file (`prev_format.h`), so a name
+cannot be chosen to collide with a common one. A writer draws a new
+key per table; readers take it from the file.
 
 TAXII is not a feed. A STIX `url` is one HTTP GET of a bundle. A
 collector that speaks TAXII saves that bundle, and `path` compiles the

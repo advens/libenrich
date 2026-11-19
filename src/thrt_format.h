@@ -36,7 +36,7 @@
 #define THRT_IP_ACCEL_MASK (THRT_IP_ACCEL_SLOTS - 1)
 
 #define THRT_MAGIC 0x54485254  // "THRT" in ASCII
-#define THRT_VERSION 4
+#define THRT_VERSION 5
 
 /* ============================================================================
  * ENTRY TYPE FLAGS
@@ -75,11 +75,11 @@
 #define THRT_CAT_PROXY 0x0400 /* Open proxies */
 
 /* ============================================================================
- * FILE HEADER (V4)
+ * FILE HEADER (V4 layout, also used by V5)
  * ============================================================================ */
 typedef struct {
     uint32_t magic;  // "THRT"
-    uint32_t version;  // Version 4
+    uint32_t version;  // THRT_VERSION
 
     uint64_t total_size;  // Total file size
 
@@ -113,7 +113,19 @@ typedef struct {
 
     // [V4] Additional offsets
     uint64_t offset_feeds;  // Points to feed name table (array of 64-byte strings)
-    uint64_t offset_sources;  // Points to source_entry_t table (legacy compat)
+    // Bit i is set when feed i is a public CTI feed. A reader that prints
+    // feed names masks feed_mask with it, so restricted and tags feeds stay
+    // out of the output.
+    uint64_t public_feed_mask;
+
+    // The address rows as the feeds declared them, before overlapping
+    // ranges are cut into the disjoint pieces lookups search. Only the
+    // builder reads them back, so a fold can merge, withdraw or evict an
+    // exact network. Same entry layouts as the lookup tables.
+    uint64_t offset_src_ipv4;
+    uint64_t offset_src_ipv6;
+    uint32_t src_ipv4_count;
+    uint32_t src_ipv6_count;
 
 } thrt_header_t;
 
@@ -127,30 +139,42 @@ typedef struct {
 } thrt_ip_accel_t;
 
 /* ============================================================================
- * METADATA RECORD V4 (The Enrichment Data)
+ * METADATA RECORD (The Enrichment Data)
  *
- * Each unique combination of (confidence, categories, tlp, type, feeds, tags)
- * gets one entry. Multiple IOCs can reference the same metadata entry.
+ * Each unique combination of fields gets one entry. Multiple IOCs can
+ * reference the same metadata entry.
+ *
+ * Since v5, confidence, tlp_mask, category_mask and feed_mask describe the
+ * public CTI layer only. A restricted (CTI_R) contribution sets the
+ * THRT_TYPE_CTI_R bit and confidence_r, nothing else, so a reader that prints
+ * the public fields never prints a restricted feed, marking or score. A tags
+ * contribution sets THRT_TYPE_TAGS and the tags only. The labels a public CTI
+ * source attaches (MISP tags, STIX labels) are kept apart from those context
+ * tags.
  * ============================================================================ */
 typedef struct {
-    uint8_t confidence;  // 0-100 (max across all contributing sources)
+    uint8_t confidence;  // 0-100, max across public CTI sources
     uint8_t type_mask;  // THRT_TYPE_* flags: which entry types matched
-    uint8_t tlp_mask;  // THRT_TLP_* flags: pre-computed from feeds
-    uint8_t pad1;  // Alignment
+    uint8_t tlp_mask;  // THRT_TLP_* flags of public CTI sources
+    uint8_t confidence_r;  // 0-100, max across restricted sources
 
-    uint16_t category_mask;  // THRT_CAT_* flags: categories from all feeds
+    uint16_t category_mask;  // THRT_CAT_* flags of public CTI sources
     uint16_t pad2;  // Alignment
 
-    uint64_t feed_mask;  // Bitmask: which feeds (up to 64) contributed
+    uint64_t feed_mask;  // Bitmask: which public CTI feeds (up to 64) contributed
 
-    uint32_t tags_offset;  // Offset into string pool for JSON tags array
-                           // 0 = no tags. Format: ["tag1","tag2",...]
-    uint32_t tags_length;  // Length of tags JSON blob (0 if no tags)
+    uint32_t tags_offset;  // Context tags (tags layer): JSON array of strings
+                           // in the string pool, 0 = none
+    uint32_t tags_length;  // Length of that JSON, 0 if none
+
+    uint32_t labels_offset;  // Labels of public CTI sources (MISP tags, STIX
+                             // labels): JSON array of strings, 0 = none
+    uint32_t labels_length;  // Length of that JSON, 0 if none
 
 } thrt_metadata_t;
 
 /* Static assert for size/alignment */
-_Static_assert(sizeof(thrt_metadata_t) == 24, "thrt_metadata_t must be 24 bytes");
+_Static_assert(sizeof(thrt_metadata_t) == 32, "thrt_metadata_t must be 32 bytes");
 _Static_assert(sizeof(thrt_metadata_t) % 8 == 0, "thrt_metadata_t must be 8-byte aligned");
 
 /* ============================================================================

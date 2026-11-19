@@ -13,6 +13,10 @@ Feeds:
 - GeoIP. MaxMind City and ASN. The checksum skips an unchanged archive.
 - User-agent table and public-suffix table. Plain downloads.
 
+`enrich.h` is also a C lookup API over those files: one snapshot of the
+database, the overlay and a prevalence table, validated on load,
+reloaded while readers run. The manual's Library section shows it.
+
 ```
 make
 make test

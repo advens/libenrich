@@ -4,7 +4,8 @@ libdir=${exec_prefix}/lib
 includedir=${prefix}/include
 
 Name: libenrich
-Description: Feed formats and the enrich command
+Description: Feed formats, lookup API and the enrich command
 Version: @VERSION@
 Libs: -L${libdir} -lenrich
+Libs.private: -lpthread
 Cflags: -I${includedir}/enrich

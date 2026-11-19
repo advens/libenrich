@@ -1,0 +1,4 @@
+{"response":{"Attribute":[
+ {"id":"1","type":"ip-dst","category":"Network activity","to_ids":true,"value":"198.51.100.10","Tag":[{"name":"tlp:green"}],"Event":{"info":"campaign-x","threat_level_id":"2"}},
+ {"id":"2","type":"ip-dst","category":"Network activity","to_ids":true,"value":"10.1.2.3","Tag":[{"name":"tlp:green"}],"Event":{"info":"campaign-y","threat_level_id":"2"}}
+]}}
