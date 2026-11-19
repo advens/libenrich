@@ -187,19 +187,39 @@ Authorization: <key>
 Accept: application/json
 Content-Type: application/json
 
-{"returnFormat":"json","last":"<window>","to_ids":1,"limit":2000,"page":1}
+{"returnFormat":"json","last":[<lo>,<hi>],"to_ids":1,"limit":2000,"page":1}
 ```
 
-`limit` defaults to 2000 (`--page-size`). The next page is requested
-until a page is shorter than that limit. Each page is released before
+A pull covers the window from its start to the time the command
+started. `last` is a range of event publish times, two Unix times, both
+included: MISP selects the attributes of the events published in it.
+
+MISP pages with an SQL offset and no `ORDER BY`. A page costs every row
+before it, so one window of millions of attributes takes hours, and an
+attribute added during the pull moves the rows after it to the next
+page. The window is cut into slices instead. Before a slice is paged,
+one request with `limit` 1 and `page` one past `--slice-rows` asks
+whether the slice holds more attributes than that. If it does, the
+slice is cut in two at its middle second and each half is checked the
+same way, the older half first. Only the busy periods are cut, and no
+page starts deeper than `--slice-rows`. One second is never cut: the
+attributes of an event share its publish time, so a large event is
+paged as one slice. `--slice-rows` defaults to ten pages.
+
+`limit` defaults to 2000 (`--page-size`). Within a slice, the next page
+is requested until a page is shorter than that limit. Each page is released before
 the next request. The pages are still saved as one attribute-search
 body at `dest`. A pull that returns no attributes leaves `dest`, the
 cursor, and `output` unchanged. A server that keeps returning a full
-page stops after 100000 pages.
+page stops after 100000 pages of one slice, and a pull stops after a
+million slices and checks.
 
 The cursor is `<dest>.cursor`. It holds the newest attribute
-`timestamp`, and that value is the next `last`. The first pull, and
-any `--full`, uses the config `since` (or `7d`) instead of the cursor.
+`timestamp`, and the next pull starts there. The first pull, and any
+`--full`, starts at the config `since` (or `7d`) instead of the
+cursor. `since` is read as MISP reads `last`: a number followed by `d`,
+`h`, or `m` counts back from now, and a plain number is a Unix time.
+A cursor older than `since` is moved up to it.
 A failed pull leaves the previous `dest` and cursor in place.
 
 Without `--apply` the command stops after `dest` and the cursor. It

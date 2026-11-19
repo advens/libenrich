@@ -10,6 +10,26 @@ The frozen surfaces are the C ABI and the on-disk `.thrt`, `.ovly`, and
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-11-19
+
+MINOR: `enrich sync` pulls a MISP window in slices it sizes itself, and
+`--slice-rows` sets the size. The C ABI, the SONAME (`libenrich.so.1`),
+and the on-disk formats are unchanged.
+
+### Changed
+
+- `enrich sync` cuts a MISP window into slices on the event publish
+  time (`"last":[lo,hi]`). A slice is checked with one request for the
+  attribute just past `--slice-rows` (ten pages by default) and cut in
+  two while it holds more, so no page starts deeper than that. One
+  second is never cut. MISP pages with an SQL offset, so a single window
+  cost every earlier row on each page: on a MISP whose 180-day
+  window holds 2.9 million attributes, 89% of them imported on one day,
+  the full pull at 2000 rows a page was on course for over two hours.
+  It now takes 23 minutes and pulls the same 3.6 GB.
+- An incremental pull no longer starts before `since`: a cursor older
+  than the window a full pull would cover is moved up to it.
+
 ## [1.0.4] - 2026-11-19
 
 PATCH: credentials stay off the process list, and opening a `.prev` of
