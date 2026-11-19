@@ -407,12 +407,30 @@ static uint8_t parse_tlp_mask(const char* s) {
 }
 
 /* --- Helper: Parse Category to bitmask --- */
+/* A feed's confidence, clamped to 0..100. Like atoi, leading space is
+ * skipped and trailing text ignored, but an out-of-range number is clamped
+ * instead of undefined, and nothing wraps: 300 is 100, not 300 mod 256. */
+static uint8_t parse_confidence(const char* s) {
+    char* end;
+    long v;
+    if (!s) return 0;
+    errno = 0;
+    v = strtol(s, &end, 10);
+    if (end == s) return 0;
+    if (v < 0) return 0;
+    if (v > 100 || errno == ERANGE) return 100;
+    return (uint8_t)v;
+}
+
 static uint16_t parse_category_mask(const char* s) {
     uint16_t mask;
     if (!s) return THRT_CAT_UNKNOWN;
     if (isdigit((unsigned char)s[0])) {
-        int cat = atoi(s);
-        if (cat > 0 && cat <= 16) return (1 << (cat - 1));
+        char* end;
+        long cat;
+        errno = 0;
+        cat = strtol(s, &end, 10);
+        if (errno == 0 && cat > 0 && cat <= 16) return (uint16_t)(1u << (cat - 1));
         return THRT_CAT_UNKNOWN;
     }
 
@@ -1148,6 +1166,7 @@ static void process_tags_csv(const char* filename) {
     while (fgets(line, sizeof(line), f)) {
         char *value;
         char tags_json[MAX_TAGS_JSON] = "[";
+        size_t tags_len = 1;
         char *tag;
         int first;
         int tags_truncated;
@@ -1173,17 +1192,19 @@ static void process_tags_csv(const char* filename) {
             /* Room needed: optional ',' + '"' + tag + '"' + closing ']' + NUL.
              * Stop cleanly if this tag would not fit rather than overflow the
              * buffer (feed data is external and untrusted). */
-            if (strlen(tags_json) + (first ? 0 : 1) + tag_len + 4 >= sizeof(tags_json)) {
+            if (tags_len + (first ? 0 : 1) + tag_len + 4 >= sizeof(tags_json)) {
                 tags_truncated = 1;
                 break;
             }
-            if (!first) strcat(tags_json, ",");
-            strcat(tags_json, "\"");
-            strcat(tags_json, tag);
-            strcat(tags_json, "\"");
+            if (!first) tags_json[tags_len++] = ',';
+            tags_json[tags_len++] = '"';
+            memcpy(tags_json + tags_len, tag, tag_len);
+            tags_len += tag_len;
+            tags_json[tags_len++] = '"';
             first = 0;
         }
-        strcat(tags_json, "]");
+        tags_json[tags_len++] = ']';
+        tags_json[tags_len] = '\0';
         if (tags_truncated) {
             fprintf(stderr, "%s tags for '%s' exceed %d bytes, list truncated\n", ICON_WARN, value,
                     MAX_TAGS_JSON);
@@ -1314,7 +1335,7 @@ static void process_csv(const char *filename) {
         ioc.action = action;
         snprintf(ioc.type, sizeof(ioc.type), "%s", tokens[col_offset + 0]);
         snprintf(ioc.value, sizeof(ioc.value), "%s", tokens[col_offset + 1]);
-        ioc.confidence = (ncols > 2) ? atoi(tokens[col_offset + 2]) : 50;
+        ioc.confidence = (ncols > 2) ? parse_confidence(tokens[col_offset + 2]) : 50;
         ioc.category_mask = (ncols > 3) ? parse_category_mask(tokens[col_offset + 3]) : 0;
         snprintf(ioc.feed, sizeof(ioc.feed), "%s", (ncols > 4) ? tokens[col_offset + 4] : g_default_source);
         ioc.tlp_mask = (ncols > 5) ? parse_tlp_mask(tokens[col_offset + 5]) : THRT_TLP_CLEAR;
@@ -1384,7 +1405,7 @@ static void process_rsyslog_json(const char* filename) {
         ioc.action = '+';
         snprintf(ioc.value, sizeof(ioc.value), "%s", ioc_val);
         snprintf(ioc.type, sizeof(ioc.type), "%s", type_str);
-        ioc.confidence = atoi(score_str);
+        ioc.confidence = parse_confidence(score_str);
         ioc.category_mask = parse_category_mask(type_str);
         snprintf(ioc.feed, sizeof(ioc.feed), "%s", feed_str);
         ioc.tlp_mask = parse_tlp_mask(tlp_str);
@@ -3133,7 +3154,7 @@ static void load_existing_thrt(const char *filename) {
     }
 
     if (g_verbose) {
-        printf("%s %sLoaded existing DB:%s %s (v%d)\n", ICON_DB, COL_BOLD, COL_RESET, filename, hdr->version);
+        printf("%s %sLoaded existing DB:%s %s (v%u)\n", ICON_DB, COL_BOLD, COL_RESET, filename, (unsigned)hdr->version);
         printf("   %u IPv4, %u IPv6, %zu strings, %u feeds, %u meta\n",
                hdr->ipv4_range_count, hdr->ipv6_range_count, str_db.count,
                hdr->feed_count, hdr->metadata_count);
@@ -3619,7 +3640,7 @@ static void parse_csv_file(const char *filename) {
                 csv_autodetect_type(ioc.value, ioc.type, sizeof(ioc.type));
             }
             ioc.confidence = (cm.conf >= 0 && cm.conf < n && tokens[cm.conf] &&
-                              tokens[cm.conf][0]) ? (uint8_t)atoi(tokens[cm.conf]) : 50;
+                              tokens[cm.conf][0]) ? parse_confidence(tokens[cm.conf]) : 50;
             ioc.category_mask = (cm.cat >= 0 && cm.cat < n && tokens[cm.cat]) ?
                                 parse_category_mask(tokens[cm.cat]) : 0;
             ioc.tlp_mask = (cm.tlp >= 0 && cm.tlp < n && tokens[cm.tlp]) ?
@@ -4218,9 +4239,23 @@ int main(int argc, char **argv) {
         } else if (strcmp(argv[i], "--snapshot") == 0) {
             delta_is_snapshot = 1;
         } else if (strcmp(argv[i], "--ttl-days") == 0 && i + 1 < argc) {
-            delta_ttl_days = (uint32_t)atoi(argv[++i]);
+            char* end;
+            unsigned long long v;
+            errno = 0;
+            v = strtoull(argv[++i], &end, 10);
+            if (errno != 0 || end == argv[i] || *end != '\0' || argv[i][0] == '-' || v > UINT32_MAX) {
+                fprintf(stderr, "thrtutil: --ttl-days takes a number of days\n");
+                return 2;
+            }
+            delta_ttl_days = (uint32_t)v;
         } else if (strcmp(argv[i], "--generation") == 0 && i + 1 < argc) {
-            delta_generation = strtoull(argv[++i], NULL, 10);
+            char* end;
+            errno = 0;
+            delta_generation = strtoull(argv[++i], &end, 10);
+            if (errno != 0 || end == argv[i] || *end != '\0' || argv[i][0] == '-') {
+                fprintf(stderr, "thrtutil: --generation takes a number\n");
+                return 2;
+            }
         } else if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) {
             thrt_out = argv[i + 1];   /* don't consume i: getopt below also reads it */
         } else if (strcmp(argv[i], "-v") == 0) {

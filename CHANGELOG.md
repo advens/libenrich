@@ -10,6 +10,36 @@ The frozen surfaces are the C ABI and the on-disk `.thrt`, `.ovly`, and
 
 ## [Unreleased]
 
+## [1.1.2] - 2026-11-19
+
+PATCH: IPv6 lookups are parsed without the libc, and the builder no
+longer wraps or overflows what it reads from feeds. The C ABI, the
+SONAME (`libenrich.so.1`), and the on-disk formats are unchanged.
+
+### Changed
+
+- `thrt_ipv6_strict()` parses IPv6 text itself instead of filtering it
+  and calling `inet_pton()`, which cost 180 to 300 ns per address. It
+  accepts and rejects exactly what `inet_pton(AF_INET6)` does on glibc
+  and FreeBSD, checked on 3 million generated, mutated and random
+  inputs. macOS also takes a hex group of more than four digits when
+  the extra digits are leading zeros, and an embedded IPv4 octet with a
+  leading zero; those are refused now on every platform, as IPv4 already
+  was. An IPv6 lookup on FreeBSD amd64 drops from 390 to 225 ns.
+
+### Fixed
+
+- A feed's `confidence` was read with `atoi()` into a `uint8_t`: 300
+  became 44, and a number past `INT_MAX` was undefined behaviour. It is
+  clamped to 0..100 now. The category number is read the same way.
+- `--ttl-days` and `--generation` took any text: `--ttl-days -3` became
+  4294967293 days. Anything but a whole number is refused.
+- The tags CSV built its JSON array with `strcat()`. It was bounded by a
+  check before, but rescanned the buffer for every tag; it writes at a
+  tracked offset now.
+- `enrich sync --hup` without `--hup-cmd` ran `pgrep` through a shell
+  (`popen()`) off Linux. It runs `pgrep` directly.
+
 ## [1.1.1] - 2026-11-19
 
 PATCH: the sources build with -Winline -Wmissing-prototypes -Werror, and

@@ -90,4 +90,30 @@ expect 203.0.113.60 CTI
 ./build/enrich -c docs/examples/enrich.json apply-delta \
     --segment docs/examples/delta.stix.json --feed-key stix-delta
 expect 203.0.113.80 CTI
+# A feed's confidence is clamped to 0..100: 300 is 100 (it wrapped to 44
+# in a uint8_t), a negative number is 0. --ttl-days and --generation take
+# whole numbers only.
+tmpb=$(mktemp -d)
+printf '%s\n' 'ip,198.51.100.71,300,malware,clamp,green' \
+    'ip,198.51.100.72,-5,malware,clamp,green' \
+    'ip,198.51.100.73,99999999999999999999,malware,clamp,green' >"$tmpb/clamp.csv"
+./build/thrtutil -o "$tmpb/clamp.thrt" "$tmpb/clamp.csv" >/dev/null
+printf '{"output": "%s/clamp.thrt"}\n' "$tmpb" >"$tmpb/clamp.json"
+conf() {
+    ./build/enrich -c "$tmpb/clamp.json" lookup "$1" | sed 's/\x1b\[[0-9;]*m//g' |
+        sed -n 's/^ *Confidence *: *\([0-9]*\)%.*/\1/p'
+}
+test "$(conf 198.51.100.71)" = 100
+test "$(conf 198.51.100.73)" = 100
+case "$(conf 198.51.100.72)" in "" | 0) ;; *) echo "negative confidence kept" >&2; exit 1 ;; esac
+if ./build/thrtutil -o "$tmpb/x.thrt" --apply-delta "$tmpb/clamp.csv" --ttl-days -3 2>/dev/null; then
+    echo "--ttl-days -3 must be refused" >&2
+    exit 1
+fi
+if ./build/thrtutil -o "$tmpb/x.thrt" --apply-delta "$tmpb/clamp.csv" --generation 7x 2>/dev/null; then
+    echo "--generation 7x must be refused" >&2
+    exit 1
+fi
+rm -rf "$tmpb"
+
 echo "docs/check.sh: ok"
