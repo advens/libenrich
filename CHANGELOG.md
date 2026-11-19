@@ -10,6 +10,8 @@ The frozen surfaces are the C ABI and the on-disk `.thrt`, `.ovly`, and
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-11-19
+
 MAJOR: a compiled lookup API, and new `.thrt`, overlay and `.prev`
 formats. Contract: abi (the SONAME is now `libenrich.so.1`) and format
 (`.thrt` version 5, overlay version 2, `.prev` version 3; older files
@@ -155,7 +157,8 @@ PATCH: each MISP page is folded and released. The C ABI, the SONAME
 - `enrich` builds a `.thrt` from a JSON config and can fetch GeoIP,
   MISP, and plain files. It does not distribute files to edges.
 
-[Unreleased]: https://github.com/advens/libenrich/compare/0.1.7...HEAD
+[Unreleased]: https://github.com/advens/libenrich/compare/1.0.0...HEAD
+[1.0.0]: https://github.com/advens/libenrich/releases/tag/1.0.0
 [0.1.7]: https://github.com/advens/libenrich/releases/tag/0.1.7
 [0.1.6]: https://github.com/advens/libenrich/releases/tag/0.1.6
 [0.1.5]: https://github.com/advens/libenrich/releases/tag/0.1.5
