@@ -10,6 +10,17 @@ The frozen surfaces are the C ABI and the on-disk `.thrt`, `.ovly`, and
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-11-19
+
+PATCH: the overlay header compiles under strict C11. The C ABI, the
+SONAME (`libenrich.so.1`), and the on-disk formats are unchanged.
+
+### Fixed
+
+- `thrt_overlay.h` used `O_CLOEXEC`, which glibc hides under plain
+  `-std=c11`, so a consumer that includes `enrich.h` without asking for
+  POSIX failed to compile. It now opens without the flag in that case.
+
 ## [1.0.0] - 2026-11-19
 
 MAJOR: a compiled lookup API, and new `.thrt`, overlay and `.prev`
@@ -157,7 +168,8 @@ PATCH: each MISP page is folded and released. The C ABI, the SONAME
 - `enrich` builds a `.thrt` from a JSON config and can fetch GeoIP,
   MISP, and plain files. It does not distribute files to edges.
 
-[Unreleased]: https://github.com/advens/libenrich/compare/1.0.0...HEAD
+[Unreleased]: https://github.com/advens/libenrich/compare/1.0.1...HEAD
+[1.0.1]: https://github.com/advens/libenrich/releases/tag/1.0.1
 [1.0.0]: https://github.com/advens/libenrich/releases/tag/1.0.0
 [0.1.7]: https://github.com/advens/libenrich/releases/tag/0.1.7
 [0.1.6]: https://github.com/advens/libenrich/releases/tag/0.1.6
