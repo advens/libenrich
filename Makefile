@@ -11,7 +11,7 @@ PREFIX    ?= /usr/local
 DESTDIR   ?=
 LIB_MAJOR := 1
 LIB_MINOR := 1
-LIB_PATCH := 0
+LIB_PATCH := 1
 SONAME    := libenrich.so.$(LIB_MAJOR)
 SOFILE    := libenrich.so.$(LIB_MAJOR).$(LIB_MINOR).$(LIB_PATCH)
 
@@ -196,7 +196,9 @@ install: all
 	   $(SRCDIR)/thrt_ipparse.h $(SRCDIR)/thrt_overlay.h $(SRCDIR)/prev_format.h \
 	   $(DESTDIR)$(PREFIX)/include/enrich/
 	cp $(BUILDDIR)/enrich $(BUILDDIR)/thrtutil $(DESTDIR)$(PREFIX)/bin/
-	cp enrich.pc $(DESTDIR)$(PCDIR)/
+	sed -e 's|@PREFIX@|$(PREFIX)|g' \
+	    -e 's|@VERSION@|$(LIB_MAJOR).$(LIB_MINOR).$(LIB_PATCH)|g' \
+	    enrich.pc.in > $(DESTDIR)$(PCDIR)/enrich.pc
 
 clean:
 	rm -rf $(BUILDDIR) enrich.pc

@@ -3960,6 +3960,8 @@ static void fold_close_state(void) {
 
 /* 0 and g_fold_active: ready for pages. 0 and not active: stale generation,
  * nothing to write. -1: the fold was not started. */
+int thrt_fold_begin(const char *out_thrt, const char *feed_key, int snapshot,
+                    int misp_delta, uint32_t ttl_days, uint64_t generation);
 int thrt_fold_begin(const char *out_thrt, const char *feed_key,
                     int is_snapshot, int misp_delta,
                     uint32_t ttl_days, uint64_t generation) {
@@ -4043,6 +4045,7 @@ fail:
     return -1;
 }
 
+int thrt_fold_page(const char *seg_path);
 int thrt_fold_page(const char *seg_path) {
     const char *bn;
     const char *ext;
@@ -4091,6 +4094,7 @@ int thrt_fold_page(const char *seg_path) {
     return 0;
 }
 
+int thrt_fold_commit(void);
 int thrt_fold_commit(void) {
     if (!g_fold_active)
         return -1;
@@ -4102,6 +4106,7 @@ int thrt_fold_commit(void) {
     return 0;
 }
 
+void thrt_fold_abort(void);
 void thrt_fold_abort(void) {
     if (!g_fold_active)
         return;

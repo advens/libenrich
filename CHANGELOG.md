@@ -10,6 +10,30 @@ The frozen surfaces are the C ABI and the on-disk `.thrt`, `.ovly`, and
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-11-19
+
+PATCH: the sources build with -Winline -Wmissing-prototypes -Werror, and
+make install writes an enrich.pc for its PREFIX. The C ABI, the SONAME (`libenrich.so.1`),
+and the on-disk formats are unchanged.
+
+### Fixed
+
+- `prev_siphash()` in `prev_format.h` was `static inline`. GCC does not
+  inline it at -O2 in a module that calls it from several places, and a
+  project that builds with `-Winline -Werror`, as rsyslog does from git,
+  stopped there. It is `static` and marked unused now; the compiler
+  still inlines it where that pays. `thrt_valid_err()`, which takes a
+  variable argument list and can never be inlined, and `thrt_validate()`
+  in `thrt_validate.h` get the same treatment.
+- `thrtutil.c` defined `thrt_fold_begin()`, `thrt_fold_page()`,
+  `thrt_fold_commit()` and `thrt_fold_abort()` with no prototype, which
+  `-Wmissing-prototypes -Werror` refuses. Each now has one, as
+  `thrt_misp_delta_mode()` already did.
+- `make install PREFIX=...` copied the `enrich.pc` written at build time,
+  so a build without `PREFIX` and an install with it left a pkg-config
+  file that pointed at `/usr/local`. Install writes it for its own
+  `PREFIX`.
+
 ## [1.1.0] - 2026-11-19
 
 MINOR: `enrich sync` pulls a MISP window in slices it sizes itself, and
