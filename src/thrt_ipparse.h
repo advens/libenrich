@@ -76,26 +76,83 @@ static inline int thrt_ipv4_strict(const char* s, size_t len, uint32_t* out) {
     return 1;
 }
 
-/* IPv6 text: hex digits, ':' and '.' (an embedded IPv4), at least one ':',
- * no zone. Then inet_pton(AF_INET6) decides. macOS accepts a "%zone"
- * suffix that glibc and FreeBSD refuse, so a zone is refused here. */
+/* Hex digit value plus one by byte, 0 for anything else: one load per
+ * character instead of a chain of range tests. */
+static const unsigned char thrt_hexval[256] = {
+    ['0'] = 1,  ['1'] = 2,  ['2'] = 3,  ['3'] = 4,  ['4'] = 5,  ['5'] = 6,  ['6'] = 7,  ['7'] = 8,
+    ['8'] = 9,  ['9'] = 10, ['a'] = 11, ['b'] = 12, ['c'] = 13, ['d'] = 14, ['e'] = 15, ['f'] = 16,
+    ['A'] = 11, ['B'] = 12, ['C'] = 13, ['D'] = 14, ['E'] = 15, ['F'] = 16,
+};
+
+/* IPv6 text, as inet_pton(AF_INET6) reads it on glibc and FreeBSD (the
+ * BIND algorithm): up to eight groups of one to four hex digits, one "::"
+ * for one or more zero groups, an optional dotted IPv4 in the last 32 bits
+ * read by thrt_ipv4_strict, nothing else. No zone: macOS takes a "%zone"
+ * suffix the others refuse. Parsed here rather than by the libc, whose
+ * inet_pton costs 190 to 300 ns per address on the hot path. */
 static inline int thrt_ipv6_strict(const char* s, size_t len, uint8_t out[16]) {
-    char buf[46];
-    struct in6_addr a6;
-    int colon = 0;
-    if (len == 0 || len >= sizeof buf) return 0;
-    for (size_t i = 0; i < len; i++) {
-        char c = s[i];
-        if (c == ':')
-            colon = 1;
-        else if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F') || c == '.'))
-            return 0;
+    uint8_t tmp[16];
+    size_t tp = 0, i = 0, curtok;
+    int colonp = -1, saw_xdigit = 0, ndig = 0;
+    unsigned val = 0;
+    if (len == 0 || len > 45) return 0;
+    if (s[0] == ':') {
+        if (len < 2 || s[1] != ':') return 0;
+        i = 1;
     }
-    if (!colon) return 0;
-    memcpy(buf, s, len);
-    buf[len] = '\0';
-    if (inet_pton(AF_INET6, buf, &a6) != 1) return 0;
-    memcpy(out, a6.s6_addr, 16);
+    curtok = i;
+    for (; i < len; i++) {
+        char c = s[i];
+        int d = (int)thrt_hexval[(unsigned char)c] - 1;
+        if (d >= 0) {
+            if (++ndig > 4) return 0;
+            val = (val << 4) | (unsigned)d;
+            saw_xdigit = 1;
+            continue;
+        }
+        if (c == ':') {
+            curtok = i + 1;
+            if (!saw_xdigit) {
+                if (colonp >= 0) return 0;
+                colonp = (int)tp;
+                continue;
+            }
+            if (i + 1 == len) return 0;
+            if (tp + 2 > sizeof tmp) return 0;
+            tmp[tp++] = (uint8_t)(val >> 8);
+            tmp[tp++] = (uint8_t)val;
+            saw_xdigit = 0;
+            ndig = 0;
+            val = 0;
+            continue;
+        }
+        if (c == '.' && tp + 4 <= sizeof tmp) {
+            uint32_t v4;
+            if (!thrt_ipv4_strict(s + curtok, len - curtok, &v4)) return 0;
+            tmp[tp++] = (uint8_t)(v4 >> 24);
+            tmp[tp++] = (uint8_t)(v4 >> 16);
+            tmp[tp++] = (uint8_t)(v4 >> 8);
+            tmp[tp++] = (uint8_t)v4;
+            saw_xdigit = 0;
+            i = len;
+            break;
+        }
+        return 0;
+    }
+    if (saw_xdigit) {
+        if (tp + 2 > sizeof tmp) return 0;
+        tmp[tp++] = (uint8_t)(val >> 8);
+        tmp[tp++] = (uint8_t)val;
+    }
+    if (colonp >= 0) {
+        size_t n = tp - (size_t)colonp;
+        if (tp == sizeof tmp) return 0;
+        memmove(tmp + sizeof tmp - n, tmp + colonp, n);
+        memset(tmp + colonp, 0, sizeof tmp - n - (size_t)colonp);
+        tp = sizeof tmp;
+    }
+    if (tp != sizeof tmp) return 0;
+    memcpy(out, tmp, sizeof tmp);
     return 1;
 }
 

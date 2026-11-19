@@ -880,29 +880,77 @@ static int read_cursor(const char *dest, char *dst, size_t dstsz)
     return is_window_token(dst);
 }
 
+#ifndef __linux__
+/* SIGHUP every process named exactly name. pgrep runs without a shell and
+ * its output is read through a pipe. */
 static int sighup_named(const char *name)
 {
-    char cmd[64];
-    FILE *p;
+    char *av[4];
+    char buf[4096];
+    size_t used = 0;
+    int fds[2];
+    int status;
     int any = 0;
     int rc = 0;
-    unsigned long pid;
+    pid_t pid;
+    char *p;
 
-    snprintf(cmd, sizeof cmd, "pgrep -x %s", name);
-    p = popen(cmd, "r");
-    if (p == NULL)
+    av[0] = "pgrep";
+    av[1] = "-x";
+    av[2] = (char *)name;
+    av[3] = NULL;
+    if (pipe(fds) != 0)
         return -1;
-    while (fscanf(p, "%lu", &pid) == 1) {
-        if (pid > 1 && kill((pid_t)pid, SIGHUP) == 0)
+    pid = fork();
+    if (pid < 0) {
+        close(fds[0]);
+        close(fds[1]);
+        return -1;
+    }
+    if (pid == 0) {
+        close(fds[0]);
+        if (dup2(fds[1], STDOUT_FILENO) < 0)
+            _exit(127);
+        close(fds[1]);
+        execvp("pgrep", av);
+        _exit(127);
+    }
+    close(fds[1]);
+    for (;;) {
+        ssize_t r;
+        if (used == sizeof buf - 1)
+            break;
+        r = read(fds[0], buf + used, sizeof buf - 1 - used);
+        if (r < 0 && errno == EINTR)
+            continue;
+        if (r <= 0)
+            break;
+        used += (size_t)r;
+    }
+    close(fds[0]);
+    buf[used] = '\0';
+    while (waitpid(pid, &status, 0) < 0 && errno == EINTR)
+        ;
+    for (p = buf; *p != '\0';) {
+        char *end;
+        unsigned long v;
+        errno = 0;
+        v = strtoul(p, &end, 10);
+        if (end == p)
+            break;
+        if (errno == 0 && v > 1 && v <= (unsigned long)INT32_MAX && kill((pid_t)v, SIGHUP) == 0)
             any = 1;
         else
             rc = -1;
+        p = end;
+        while (*p == '\n' || *p == ' ')
+            p++;
     }
-    pclose(p);
     if (!any)
         return -1;
     return rc;
 }
+#endif
 
 /* hup_cmd NULL runs the platform default. A failed signal does not
  * undo a fold that already landed. */

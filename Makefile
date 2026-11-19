@@ -11,7 +11,7 @@ PREFIX    ?= /usr/local
 DESTDIR   ?=
 LIB_MAJOR := 1
 LIB_MINOR := 1
-LIB_PATCH := 1
+LIB_PATCH := 2
 SONAME    := libenrich.so.$(LIB_MAJOR)
 SOFILE    := libenrich.so.$(LIB_MAJOR).$(LIB_MINOR).$(LIB_PATCH)
 
@@ -125,8 +125,8 @@ $(BUILDDIR)/enrich: $(BUILDDIR)/enrich_cmd.o $(LIB_OBJS) \
 		$(BUILDDIR)/thrtutil.o $(BUILDDIR)/thrt_cli.o \
 		$(BUILDDIR)/overlay_tool.o $(BUILDDIR)/prev_lookup.o $(JSON_LIBS) $(THREADS)
 
-test: $(BUILDDIR)/$(SHLIB) $(BUILDDIR)/enrich $(BUILDDIR)/test_thrt_ipparse $(BUILDDIR)/test_prev \
-		$(BUILDDIR)/test_enrich_api
+test: $(BUILDDIR)/$(SHLIB) $(BUILDDIR)/enrich $(BUILDDIR)/thrtutil $(BUILDDIR)/test_thrt_ipparse \
+		$(BUILDDIR)/test_prev $(BUILDDIR)/test_enrich_api
 	$(BUILDDIR)/test_thrt_ipparse
 	$(BUILDDIR)/test_prev
 	rm -rf $(BUILDDIR)/api && mkdir -p $(BUILDDIR)/api
