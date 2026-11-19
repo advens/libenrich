@@ -530,6 +530,24 @@ static void test_bad_files(void) {
         CHECK(enrich_open(&e, &o, err, sizeof err) == ENRICH_EVERSION && e == NULL);
         unlink(ov);
     }
+    /* A .prev of another version is refused, and the message names it. */
+    {
+        char pv[800];
+        prev_header_t ph;
+        memset(&ph, 0, sizeof ph);
+        ph.magic = PREV_MAGIC;
+        ph.version = 2;
+        snprintf(pv, sizeof pv, "%s", path_of("old.prev"));
+        f = fopen(pv, "wb");
+        if (f) {
+            fwrite(&ph, sizeof ph, 1, f);
+            fclose(f);
+        }
+        o = (enrich_options_t){sizeof o, NULL, NULL, pv, 0};
+        CHECK(enrich_open(&e, &o, err, sizeof err) == ENRICH_EVERSION && e == NULL);
+        CHECK(strstr(err, ".prev version 2") != NULL);
+        unlink(pv);
+    }
     unlink(bad);
 }
 

@@ -284,8 +284,9 @@ static int prev_db_load(const char *path, prev_db_t **out, char *err, size_t err
         return ENRICH_EFORMAT;
     }
     if (h->version != PREV_VERSION) {
-        munmap(map, size);
+        /* Read the header before it is unmapped. */
         seterr(err, err_len, "%s: .prev version %u, this library reads %u", path, h->version, PREV_VERSION);
+        munmap(map, size);
         return ENRICH_EVERSION;
     }
     table = prev_table_map(map, size, &slots);

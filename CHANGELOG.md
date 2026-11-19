@@ -10,6 +10,26 @@ The frozen surfaces are the C ABI and the on-disk `.thrt`, `.ovly`, and
 
 ## [Unreleased]
 
+## [1.0.4] - 2026-11-19
+
+PATCH: credentials stay off the process list, and opening a `.prev` of
+another version no longer crashes. The C ABI, the SONAME
+(`libenrich.so.1`), and the on-disk formats are unchanged.
+
+### Security
+
+- `enrich` passed the MISP automation key (`-H Authorization: ...`) and
+  the MaxMind account and license key (`-u ...`) to curl as arguments,
+  which every local user can read in the process list. curl now reads
+  them as a config on its standard input (`-K -`). Rotate a key that was
+  in use on a host shared with other users.
+
+### Fixed
+
+- `enrich_open()` and `enrich_reload()` unmapped a `.prev` of another
+  version, then read its version number for the error message. A host
+  still holding a version 2 `.prev` crashed at configuration load.
+
 ## [1.0.3] - 2026-11-19
 
 PATCH: the overlay header compiles under strict C11. The C ABI, the
@@ -179,7 +199,8 @@ PATCH: each MISP page is folded and released. The C ABI, the SONAME
 - `enrich` builds a `.thrt` from a JSON config and can fetch GeoIP,
   MISP, and plain files. It does not distribute files to edges.
 
-[Unreleased]: https://github.com/advens/libenrich/compare/1.0.3...HEAD
+[Unreleased]: https://github.com/advens/libenrich/compare/1.0.4...HEAD
+[1.0.4]: https://github.com/advens/libenrich/releases/tag/1.0.4
 [1.0.3]: https://github.com/advens/libenrich/releases/tag/1.0.3
 [1.0.2]: https://github.com/advens/libenrich/releases/tag/1.0.2
 [1.0.1]: https://github.com/advens/libenrich/releases/tag/1.0.1

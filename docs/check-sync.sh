@@ -125,6 +125,20 @@ cat >"$tmp/live.json" <<EOF
 EOF
 chmod 600 "$tmp/live.json"
 
+# The key reaches MISP (the stand-in answers 401 without it) but never
+# curl's arguments, which every local user can read in the process list.
+mkdir -p "$tmp/shim"
+real_curl=$(command -v curl)
+printf '#!/bin/sh\nprintf "%%s\\n" "$*" >>"%s"\nexec "%s" "$@"\n' "$tmp/curl.argv" "$real_curl" >"$tmp/shim/curl"
+chmod 755 "$tmp/shim/curl"
+PATH="$tmp/shim:$PATH" ./build/enrich -c "$tmp/live.json" sync --full >/dev/null
+test -s "$tmp/curl.argv"
+if grep -q 'test-key' "$tmp/curl.argv"; then
+    echo "the MISP key is on the curl command line" >&2
+    exit 1
+fi
+rm -f "$tmp/live.misp.json" "$tmp/live.misp.json.cursor"
+
 # Every page is saved. Without --apply the database is not created.
 cat >"$tmp/cache.json" <<EOF
 {
