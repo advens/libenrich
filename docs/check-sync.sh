@@ -7,6 +7,7 @@ test -x build/enrich
 tmp=$(mktemp -d)
 srv=0
 srv2=0
+srv3=0
 cleanup() {
     if [ "$srv" != 0 ]; then
         kill "$srv" 2>/dev/null || true
@@ -15,6 +16,10 @@ cleanup() {
     if [ "$srv2" != 0 ]; then
         kill "$srv2" 2>/dev/null || true
         wait "$srv2" 2>/dev/null || true
+    fi
+    if [ "$srv3" != 0 ]; then
+        kill "$srv3" 2>/dev/null || true
+        wait "$srv3" 2>/dev/null || true
     fi
     rm -rf "$tmp"
 }
@@ -96,7 +101,11 @@ else
 fi
 
 cc -std=c11 -O2 -o "$tmp/misp-standin" docs/sync-misp-standin.c
-"$tmp/misp-standin" >"$tmp/port" 2>"$tmp/standin.err" &
+# Publish times in the stand-in count back from t0, so a test with a
+# Unix-time since knows every slice edge.
+t0=$(date +%s)
+day=86400
+"$tmp/misp-standin" "$t0" >"$tmp/port" 2>"$tmp/standin.err" &
 srv=$!
 i=0
 while [ ! -s "$tmp/port" ]; do
@@ -159,7 +168,7 @@ test ! -e "$tmp/cache.thrt"
 grep -q "sync-sample" "$tmp/cache.misp.json"
 grep -q "203.0.113.202" "$tmp/cache.misp.json"
 grep -q "203.0.113.203" "$tmp/cache.misp.json"
-grep -q '^180$' "$tmp/cache.misp.json.cursor"
+grep -q "^$((t0 - day))$" "$tmp/cache.misp.json.cursor"
 
 ./build/enrich -c "$tmp/live.json" sync --apply --page-size 1
 out=$(./build/enrich -c "$tmp/live.json" lookup 203.0.113.201)
@@ -168,7 +177,7 @@ out=$(./build/enrich -c "$tmp/live.json" lookup 203.0.113.202)
 printf '%s\n' "$out" | grep -q CTI
 out=$(./build/enrich -c "$tmp/live.json" lookup 203.0.113.203)
 printf '%s\n' "$out" | grep -q CTI
-grep -q '^180$' "$tmp/live.misp.json.cursor"
+grep -q "^$((t0 - day))$" "$tmp/live.misp.json.cursor"
 grep -q "sync-sample" "$tmp/live.misp.json"
 grep -q "203.0.113.203" "$tmp/live.misp.json"
 # Three pages, one generation.
@@ -197,16 +206,34 @@ out=$(./build/enrich -c "$tmp/live.json" lookup 203.0.113.201)
 printf '%s\n' "$out" | grep -q CTI
 out=$(./build/enrich -c "$tmp/live.json" lookup 203.0.113.203)
 printf '%s\n' "$out" | grep -q CTI
-grep -q '^180$' "$tmp/live.misp.json.cursor"
+grep -q "^$((t0 - day))$" "$tmp/live.misp.json.cursor"
 
-./build/enrich -c "$tmp/live.json" sync --apply --page-size 1
+# The same MISP after 203.0.113.201 was deleted. An incremental pull
+# starts at the cursor and folds the withdrawal.
+"$tmp/misp-standin" "$t0" withdrawn >"$tmp/port3" 2>"$tmp/standin3.err" &
+srv3=$!
+i=0
+while [ ! -s "$tmp/port3" ]; do
+    i=$((i + 1))
+    if [ "$i" -gt 50 ]; then
+        echo "withdrawn stand-in did not start" >&2
+        exit 1
+    fi
+    sleep 0.1
+done
+port3=$(cat "$tmp/port3")
+sed "s/127.0.0.1:$port\"/127.0.0.1:$port3\"/" "$tmp/live.json" >"$tmp/withdrawn.json"
+chmod 600 "$tmp/withdrawn.json"
+./build/enrich -c "$tmp/withdrawn.json" sync --apply --page-size 1
+first=$(awk 'NR == 1 { print $2 }' "$tmp/standin3.err")
+test "$first" = "$((t0 - day))"
 out=$(./build/enrich -c "$tmp/live.json" lookup 203.0.113.201)
 printf '%s\n' "$out" | grep -q "NO MATCH"
 out=$(./build/enrich -c "$tmp/live.json" lookup 203.0.113.202)
 printf '%s\n' "$out" | grep -q CTI
 out=$(./build/enrich -c "$tmp/live.json" lookup 203.0.113.203)
 printf '%s\n' "$out" | grep -q CTI
-grep -q '^300$' "$tmp/live.misp.json.cursor"
+grep -q "^$((t0 - 3600))$" "$tmp/live.misp.json.cursor"
 grep -q '"deleted"' "$tmp/live.misp.json"
 
 # The deleted indicator comes back when the feed is snapshotted again.
@@ -215,11 +242,61 @@ out=$(./build/enrich -c "$tmp/live.json" lookup 203.0.113.201)
 printf '%s\n' "$out" | grep -q CTI
 out=$(./build/enrich -c "$tmp/live.json" lookup 203.0.113.203)
 printf '%s\n' "$out" | grep -q CTI
-grep -q '^180$' "$tmp/live.misp.json.cursor"
+grep -q "^$((t0 - day))$" "$tmp/live.misp.json.cursor"
 grep -q "sync-sample" "$tmp/live.misp.json"
 
+# A slice over --slice-rows is split in two until it fits; one second is
+# never split. The stand-in logs "window LO HI PAGE LIMIT": a probe asks
+# for one row, a page for --page-size rows. Its rows are published at
+# t0 - 3d, three at t0 - 2d - 1s, t0 - 2d, and t0 - 1d.
+cat >"$tmp/slice.json" <<EOF
+{
+  "output": "$tmp/slice.thrt",
+  "feeds": [{
+    "name": "lab-misp",
+    "type": "misp",
+    "url": "http://127.0.0.1:$port",
+    "key": "test-key",
+    "since": "$((t0 - 3 * day))",
+    "dest": "$tmp/slice.misp.json"
+  }]
+}
+EOF
+chmod 600 "$tmp/slice.json"
+mark=$(wc -l <"$tmp/standin.err")
+./build/enrich -c "$tmp/slice.json" sync --apply --page-size 2 --slice-rows 2
+tail -n +"$((mark + 1))" "$tmp/standin.err" >"$tmp/slice.windows"
+awk -v start="$((t0 - 3 * day))" -v t0="$t0" -v day="$day" '
+    BEGIN {
+        pub[1] = t0 - 3 * day; pub[2] = t0 - 2 * day - 1; pub[3] = pub[2]
+        pub[4] = pub[2]; pub[5] = t0 - 2 * day; pub[6] = t0 - day
+    }
+    $5 == 1 { probes++ }
+    $5 == 2 && $4 == 1 {
+        n++; lo[n] = $2; hi[n] = $3
+        rows = 0
+        for (k = 1; k <= 6; k++) if (pub[k] >= $2 && pub[k] <= $3) rows++
+        if ($2 < $3 && rows > 2) { print "window " $2 "-" $3 " holds " rows; bad = 1 }
+        if ($2 == $3 && $2 == pub[2]) single = 1
+    }
+    $5 == 2 && $4 == 2 && $2 == $3 && $2 == pub[2] { paged = 1 }
+    END {
+        if (probes == 0) { print "no probe"; bad = 1 }
+        if (n == 0 || lo[1] != start) { print "the first page does not start the window"; bad = 1 }
+        for (k = 2; k <= n; k++)
+            if (lo[k] != hi[k - 1] + 1) { print "window " k " does not follow"; bad = 1 }
+        if (hi[n] < t0) { print "the last page ends at " hi[n]; bad = 1 }
+        if (!single || !paged) { print "the three-row second was not paged on its own"; bad = 1 }
+        exit bad
+    }
+' "$tmp/slice.windows"
+for ip in 203.0.113.201 203.0.113.202 203.0.113.203 203.0.113.204 203.0.113.205 203.0.113.206; do
+    test "$(grep -o "\"$ip\"" "$tmp/slice.misp.json" | wc -l | tr -d ' ')" = 1
+    ./build/enrich -c "$tmp/slice.json" lookup "$ip" | grep -q CTI
+done
+
 # A failed later page must not replace dest, the cursor, or output.
-"$tmp/misp-standin" fail-page >"$tmp/port2" 2>"$tmp/standin2.err" &
+"$tmp/misp-standin" "$t0" fail-page >"$tmp/port2" 2>"$tmp/standin2.err" &
 srv2=$!
 i=0
 while [ ! -s "$tmp/port2" ]; do
@@ -253,7 +330,7 @@ out=$(./build/enrich -c "$tmp/live.json" lookup 203.0.113.201)
 printf '%s\n' "$out" | grep -q CTI
 out=$(./build/enrich -c "$tmp/live.json" lookup 203.0.113.203)
 printf '%s\n' "$out" | grep -q CTI
-grep -q '^180$' "$tmp/live.misp.json.cursor"
+grep -q "^$((t0 - day))$" "$tmp/live.misp.json.cursor"
 grep -q "sync-sample" "$tmp/live.misp.json"
 if find "$tmp" \( -name '*.page.*.misp.json' -o -name '*.pull.*.misp.json' -o -name '*.work.*' \) | grep -q .; then
     echo "a failed pull left a page or work file" >&2

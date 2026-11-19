@@ -12,6 +12,7 @@
 #include <json.h>
 
 #include <errno.h>
+#include <inttypes.h>
 #include <fcntl.h>
 #include <stdint.h>
 #include <signal.h>
@@ -698,6 +699,54 @@ static int is_window_token(const char *s)
     return 1;
 }
 
+/* Seconds in a window token: digits then d, h, or m. Plain digits are
+ * seconds. 0 when the token is not a window or overflows. */
+static uint64_t window_seconds(const char *s)
+{
+    uint64_t v = 0;
+    uint64_t mult = 1;
+    size_t i;
+
+    if (!is_window_token(s))
+        return 0;
+    for (i = 0; s[i] >= '0' && s[i] <= '9'; i++) {
+        if (v > (UINT64_MAX - 9) / 10)
+            return 0;
+        v = v * 10 + (uint64_t)(s[i] - '0');
+    }
+    if (s[i] == 'd')
+        mult = 86400;
+    else if (s[i] == 'h')
+        mult = 3600;
+    else if (s[i] == 'm')
+        mult = 60;
+    if (v > UINT64_MAX / mult)
+        return 0;
+    return v * mult;
+}
+
+/* The first second a MISP window covers, read the way MISP reads "last":
+ * digits then a unit count back from now, plain digits are a Unix time.
+ * -1 when the token is not a window. */
+static int window_start(const char *s, uint64_t now, uint64_t *start)
+{
+    size_t n;
+    uint64_t span;
+
+    if (!is_window_token(s))
+        return -1;
+    n = strlen(s);
+    span = window_seconds(s);
+    if (s[n - 1] >= '0' && s[n - 1] <= '9') {
+        if (span == 0 && strcmp(s, "0") != 0)
+            return -1;
+        *start = span;
+        return 0;
+    }
+    *start = span >= now ? 0 : now - span;
+    return 0;
+}
+
 static void feed_stem(const char *path, char *out, size_t outsz)
 {
     const char *base;
@@ -990,10 +1039,9 @@ static struct json_object *load_json_file(const char *path)
     return obj;
 }
 
-static void misp_endpoint(const char *url, char *endpoint, size_t n)
+static void misp_endpoint(const char *url, const char *suffix, char *endpoint, size_t n)
 {
     size_t len;
-    const char *suffix = "/attributes/restSearch";
 
     if (strncmp(url, "https://", 8) != 0 && strncmp(url, "http://", 7) != 0)
         die("misp url must be http or https");
@@ -1136,13 +1184,68 @@ static int install_output(const char *work, const char *out)
     return 0;
 }
 
+/* Rows in a slice before it is split, in pages, when --slice-rows is
+ * not given. */
+#define MISP_SLICE_PAGES 10
+/* Bisection of a 64-bit second range is at most 64 levels deep. The
+ * stack holds the right half of every level plus the slice in hand. */
+#define MISP_SLICE_STACK 130
+/* Probes and slices in one pull. A real window needs a few hundred. */
+#define MISP_SLICE_CAP 1000000
+
+struct misp_slice {
+    uint64_t lo;
+    uint64_t hi;
+};
+
+/* Does [lo, hi] hold more than rows attributes? One request for the
+ * single attribute at offset rows: MISP skips rows matches and returns
+ * at most one. 1 yes, 0 no, -1 when the probe failed. The row is not
+ * kept. */
+static int misp_slice_over(const char *endpoint, const char *hdr, const char *page_path,
+                           uint64_t lo, uint64_t hi, uint64_t rows)
+{
+    char req[256];
+    struct json_object *root;
+    struct json_object *attrs;
+    int over;
+
+    snprintf(req, sizeof req,
+             "{\"returnFormat\":\"json\",\"last\":[%" PRIu64 ",%" PRIu64 "],"
+             "\"to_ids\":1,\"limit\":1,\"page\":%" PRIu64 "}",
+             lo, hi, rows + 1);
+    if (curl_to_file(endpoint, NULL, hdr, req, page_path) != 0)
+        return -1;
+    root = load_json_file(page_path);
+    unlink(page_path);
+    if (root == NULL)
+        return -1;
+    attrs = attribute_array(root);
+    if (attrs == NULL || !json_object_is_type(attrs, json_type_array)) {
+        json_object_put(root);
+        return -1;
+    }
+    over = json_object_array_length(attrs) > 0;
+    json_object_put(root);
+    return over;
+}
+
 /* One page in memory at a time. 0 leaves body_path complete and, when
  * apply is set, work_path written once for the whole pull. 1 means the
  * window was empty and nothing was written. -1 leaves dest and output
  * alone. The json-c tree is freed before the page is folded and before
- * the next request. */
+ * the next request.
+ *
+ * MISP pages with an SQL offset and no ORDER BY: one page costs every row
+ * before it, and a row added during the pull moves the rows after it. The
+ * window [from, to] is cut on the event publish time instead. A slice that
+ * holds more than slice_rows attributes is split in two, depth first and
+ * oldest half first, so the slices are paged in time order and no page
+ * starts deeper than slice_rows. One second is never split: an event is
+ * published at one second, and its attributes are paged together. */
 static int pull_misp(struct json_object *cfg, const char *url, const char *key,
-                     const char *last, int page_size, const char *dest,
+                     uint64_t from, uint64_t to, int page_size, uint64_t slice_rows,
+                     const char *dest,
                      const char *out, const char *feed, int apply, int snapshot,
                      char *body_path, size_t body_pathsz,
                      char *work_path, size_t work_pathsz,
@@ -1153,6 +1256,11 @@ static int pull_misp(struct json_object *cfg, const char *url, const char *key,
     char page_path[1100];
     FILE *body = NULL;
     int page;
+    uint64_t lo;
+    uint64_t hi;
+    struct misp_slice stack[MISP_SLICE_STACK];
+    size_t depth = 0;
+    long steps = 0;
     int first = 1;
     int saw = 0;
     int prepared = 0;
@@ -1166,7 +1274,7 @@ static int pull_misp(struct json_object *cfg, const char *url, const char *key,
         die("misp key is too long");
     if (apply && (out == NULL || out[0] == '\0'))
         return -1;
-    misp_endpoint(url, endpoint, sizeof endpoint);
+    misp_endpoint(url, "/attributes/restSearch", endpoint, sizeof endpoint);
     snprintf(hdr, sizeof hdr, "Authorization: %s", key);
     nw = snprintf(page_path, sizeof page_path, "%s.page.%d.misp.json", dest, pid);
     if (nw < 0 || (size_t)nw >= sizeof page_path)
@@ -1180,89 +1288,123 @@ static int pull_misp(struct json_object *cfg, const char *url, const char *key,
             return -1;
     }
 
-    for (page = 1; page <= MISP_PAGE_CAP; page++) {
-        char req[256];
-        struct json_object *root;
-        struct json_object *attrs;
-        int n;
-        int valid = 0;
-        int i;
-
-        snprintf(req, sizeof req,
-                 "{\"returnFormat\":\"json\",\"last\":\"%s\",\"to_ids\":1,\"limit\":%d,\"page\":%d}",
-                 last, page_size, page);
-        if (curl_to_file(endpoint, NULL, hdr, req, page_path) != 0) {
-            fprintf(stderr, "enrich: misp download failed\n");
+    if (from > to || slice_rows == 0)
+        return -1;
+    stack[depth].lo = from;
+    stack[depth].hi = to;
+    depth++;
+    while (depth > 0) {
+        depth--;
+        lo = stack[depth].lo;
+        hi = stack[depth].hi;
+        if (++steps > MISP_SLICE_CAP) {
+            fprintf(stderr, "enrich: misp slice limit reached\n");
             goto fail;
         }
-        root = load_json_file(page_path);
-        if (root == NULL) {
-            fprintf(stderr, "enrich: misp page is not an attribute search\n");
-            goto fail;
-        }
-        attrs = attribute_array(root);
-        if (attrs == NULL || !json_object_is_type(attrs, json_type_array)) {
-            json_object_put(root);
-            fprintf(stderr, "enrich: misp page is not an attribute search\n");
-            goto fail;
-        }
-        n = json_object_array_length(attrs);
-        for (i = 0; i < n; i++) {
-            struct json_object *one = json_object_array_get_idx(attrs, i);
-            const char *text;
-            uint64_t ts;
-
-            if (one == NULL || !json_object_is_type(one, json_type_object))
+        if (lo < hi) {
+            int over = misp_slice_over(endpoint, hdr, page_path, lo, hi, slice_rows);
+            if (over < 0) {
+                fprintf(stderr, "enrich: misp download failed\n");
+                goto fail;
+            }
+            if (over) {
+                uint64_t mid = lo + (hi - lo) / 2;
+                if (depth + 2 > MISP_SLICE_STACK)
+                    goto fail;
+                stack[depth].lo = mid + 1;
+                stack[depth].hi = hi;
+                depth++;
+                stack[depth].lo = lo;
+                stack[depth].hi = mid;
+                depth++;
                 continue;
-            if (body == NULL) {
-                body = fopen(body_path, "w");
-                if (body == NULL ||
-                    fputs("{\"response\":{\"Attribute\":[", body) == EOF) {
+            }
+        }
+        for (page = 1; page <= MISP_PAGE_CAP; page++) {
+            char req[256];
+            struct json_object *root;
+            struct json_object *attrs;
+            int n;
+            int valid = 0;
+            int i;
+
+            snprintf(req, sizeof req,
+                     "{\"returnFormat\":\"json\",\"last\":[%" PRIu64 ",%" PRIu64 "],"
+                     "\"to_ids\":1,\"limit\":%d,\"page\":%d}",
+                     lo, hi, page_size, page);
+            if (curl_to_file(endpoint, NULL, hdr, req, page_path) != 0) {
+                fprintf(stderr, "enrich: misp download failed\n");
+                goto fail;
+            }
+            root = load_json_file(page_path);
+            if (root == NULL) {
+                fprintf(stderr, "enrich: misp page is not an attribute search\n");
+                goto fail;
+            }
+            attrs = attribute_array(root);
+            if (attrs == NULL || !json_object_is_type(attrs, json_type_array)) {
+                json_object_put(root);
+                fprintf(stderr, "enrich: misp page is not an attribute search\n");
+                goto fail;
+            }
+            n = json_object_array_length(attrs);
+            for (i = 0; i < n; i++) {
+                struct json_object *one = json_object_array_get_idx(attrs, i);
+                const char *text;
+                uint64_t ts;
+
+                if (one == NULL || !json_object_is_type(one, json_type_object))
+                    continue;
+                if (body == NULL) {
+                    body = fopen(body_path, "w");
+                    if (body == NULL ||
+                        fputs("{\"response\":{\"Attribute\":[", body) == EOF) {
+                        json_object_put(root);
+                        goto fail;
+                    }
+                }
+                ts = json_timestamp(one);
+                if (ts > newest)
+                    newest = ts;
+                text = json_object_to_json_string(one);
+                if (text == NULL ||
+                    (!first && fputc(',', body) == EOF) ||
+                    fputs(text, body) == EOF) {
                     json_object_put(root);
                     goto fail;
                 }
+                first = 0;
+                valid++;
+                saw = 1;
             }
-            ts = json_timestamp(one);
-            if (ts > newest)
-                newest = ts;
-            text = json_object_to_json_string(one);
-            if (text == NULL ||
-                (!first && fputc(',', body) == EOF) ||
-                fputs(text, body) == EOF) {
-                json_object_put(root);
-                goto fail;
-            }
-            first = 0;
-            valid++;
-            saw = 1;
-        }
-        json_object_put(root);
+            json_object_put(root);
 
-        /* Snapshot once, then every page adds. The database is written
-         * after the last page. An incremental window is all adds and
-         * withdrawals, still one write. */
-        if (valid > 0 && apply) {
-            if (!prepared) {
-                if (prepare_fold(cfg, out, work_path, snapshot) != 0)
-                    goto fail;
-                if (thrt_fold_begin(work_path, feed, snapshot ? 1 : 0,
-                                    snapshot ? 0 : 1, 0, 0) != 0) {
+            /* Snapshot once, then every page adds. The database is written
+             * after the last page. An incremental window is all adds and
+             * withdrawals, still one write. */
+            if (valid > 0 && apply) {
+                if (!prepared) {
+                    if (prepare_fold(cfg, out, work_path, snapshot) != 0)
+                        goto fail;
+                    if (thrt_fold_begin(work_path, feed, snapshot ? 1 : 0,
+                                        snapshot ? 0 : 1, 0, 0) != 0) {
+                        fprintf(stderr, "enrich: apply-delta failed\n");
+                        goto fail;
+                    }
+                    prepared = 1;
+                }
+                if (thrt_fold_page(page_path) != 0) {
                     fprintf(stderr, "enrich: apply-delta failed\n");
                     goto fail;
                 }
-                prepared = 1;
             }
-            if (thrt_fold_page(page_path) != 0) {
-                fprintf(stderr, "enrich: apply-delta failed\n");
+            unlink(page_path);
+            if (n < page_size)
+                break;
+            if (page == MISP_PAGE_CAP) {
+                fprintf(stderr, "enrich: misp page limit reached\n");
                 goto fail;
             }
-        }
-        unlink(page_path);
-        if (n < page_size)
-            break;
-        if (page == MISP_PAGE_CAP) {
-            fprintf(stderr, "enrich: misp page limit reached\n");
-            goto fail;
         }
     }
     if (!saw) {
@@ -1420,16 +1562,18 @@ static void sync_segment(struct json_object *cfg, const char *segment,
 
 static void sync_pull(struct json_object *cfg, const char *cfg_path,
                       const char *feed_key, int apply, int full, int page_size,
-                      int do_hup, const char *hup_cmd)
+                      int slice_rows, int do_hup, const char *hup_cmd)
 {
     struct json_object *feed;
     const char *url;
     const char *key;
     const char *dest;
     const char *since;
-    const char *last;
     const char *out;
     char cursor[64];
+    uint64_t now = (uint64_t)time(NULL);
+    uint64_t from;
+    uint64_t floor_ts;
     char stem[64];
     char body_path[1100];
     char work_path[1100];
@@ -1453,7 +1597,7 @@ static void sync_pull(struct json_object *cfg, const char *cfg_path,
                 cfg_path);
     if (since == NULL || since[0] == '\0')
         since = "7d";
-    if (!is_window_token(since))
+    if (window_start(since, now, &floor_ts) != 0)
         die("misp since is not a window");
     out = NULL;
     if (apply) {
@@ -1462,16 +1606,23 @@ static void sync_pull(struct json_object *cfg, const char *cfg_path,
             die("config output is missing");
     }
     have = read_cursor(dest, cursor, sizeof cursor);
-    if (full || !have) {
-        last = since;
-        snapshot = 1;
-    } else {
-        last = cursor;
+    /* An incremental pull starts at the cursor, never before the window
+     * a full pull would cover. */
+    from = floor_ts;
+    snapshot = 1;
+    if (!full && have && window_start(cursor, now, &from) == 0) {
         snapshot = 0;
+        if (from < floor_ts)
+            from = floor_ts;
     }
+    if (from > now)
+        from = now;
     /* The fold identity is the dest stem, the same name build uses. */
     feed_stem(dest, stem, sizeof stem);
-    pulled = pull_misp(cfg, url, key, last, page_size, dest, out, stem,
+    pulled = pull_misp(cfg, url, key, from, now, page_size,
+                       slice_rows > 0 ? (uint64_t)slice_rows
+                                      : (uint64_t)page_size * MISP_SLICE_PAGES,
+                       dest, out, stem,
                        apply, snapshot, body_path, sizeof body_path,
                        work_path, sizeof work_path, &newest);
     if (pulled < 0)
@@ -1742,7 +1893,7 @@ static void sync_follow(struct json_object *cfg, const char *cfg_path,
 
 static void cmd_sync(struct json_object *cfg, const char *cfg_path,
                      const char *segment, const char *feed_key, int apply, int full,
-                     int page_size, int follow, const char *zmq_endpoint,
+                     int page_size, int slice_rows, int follow, const char *zmq_endpoint,
                      int flush_seconds, int do_hup, const char *hup_cmd)
 {
     if (follow && segment != NULL)
@@ -1758,7 +1909,7 @@ static void cmd_sync(struct json_object *cfg, const char *cfg_path,
     }
     /* A pull selects the feed by name. --feed-key on a segment is the
      * fold identity, not a MISP feed name. */
-    sync_pull(cfg, cfg_path, feed_key, apply, full, page_size, do_hup, hup_cmd);
+    sync_pull(cfg, cfg_path, feed_key, apply, full, page_size, slice_rows, do_hup, hup_cmd);
 }
 
 static void usage(void)
@@ -1771,7 +1922,7 @@ static void usage(void)
             "       enrich [-c file] apply-delta --segment <file> [--feed-key K]\n"
             "              [--snapshot] [--ttl-days N] [--generation G]\n"
             "       enrich [-c file] sync [--apply] [--full] [--hup]\n"
-            "              [--segment file] [--feed-key K] [--page-size N]\n"
+            "              [--segment file] [--feed-key K] [--page-size N] [--slice-rows N]\n"
             "              [--follow] [--flush-seconds N] [--zmq ENDPOINT]\n"
             "              [--hup-cmd CMD]\n"
             "\n"
@@ -1801,6 +1952,7 @@ int main(int argc, char **argv)
     int sync_hup = 0;
     int sync_follow = 0;
     int page_size = 2000;
+    int slice_rows = 0;
     int flush_seconds = 300;
     const char *zmq_endpoint = NULL;
     const char *hup_cmd = NULL;
@@ -1861,6 +2013,13 @@ int main(int argc, char **argv)
             }
             continue;
         }
+        if (strcmp(argv[i], "--slice-rows") == 0 && i + 1 < argc) {
+            if (parse_u(argv[++i], 10000000, &slice_rows) != 0) {
+                usage();
+                return 2;
+            }
+            continue;
+        }
         if (strcmp(argv[i], "--flush-seconds") == 0 && i + 1 < argc) {
             if (parse_u(argv[++i], 86400, &flush_seconds) != 0) {
                 usage();
@@ -1914,7 +2073,7 @@ int main(int argc, char **argv)
             return 2;
         }
         cmd_sync(cfg, cfg_path, segment, feed_key, sync_apply, sync_full, page_size,
-                 sync_follow, zmq_endpoint, flush_seconds,
+                 slice_rows, sync_follow, zmq_endpoint, flush_seconds,
                  sync_hup || hup_cmd != NULL, hup_cmd);
     } else {
         usage();
