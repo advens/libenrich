@@ -111,6 +111,21 @@ static uint32_t rnd(uint32_t n) {
     return (uint32_t)(rng_state % n);
 }
 
+/* Append text to out[0..cap) at *n, keeping a NUL. 0 when it does not fit,
+ * and nothing is written then. */
+static int put_text(char* out, size_t cap, size_t* n, const char* text) {
+    size_t l = strlen(text);
+    if (*n + l >= cap) return 0;
+    memcpy(out + *n, text, l + 1);
+    *n += l;
+    return 1;
+}
+
+static int put_char(char* out, size_t cap, size_t* n, char c) {
+    char t[2] = {c, '\0'};
+    return put_text(out, cap, n, t);
+}
+
 /* A valid IPv6 text: eight groups, a run of zero groups maybe written as
  * "::", maybe a dotted IPv4 in the last two, random case. */
 static size_t gen_valid(char* out, size_t cap) {
@@ -126,11 +141,11 @@ static size_t gen_valid(char* out, size_t cap) {
     }
     for (int i = 0; i < ngroups; i++) {
         if (i == zs) {
-            n += (size_t)snprintf(out + n, cap - n, i == 0 ? "::" : ":");
+            if (!put_text(out, cap, &n, i == 0 ? "::" : ":")) return 0;
             i += zl - 1;
             continue;
         }
-        if (i > 0 && !(zs >= 0 && i == zs + zl)) out[n++] = ':';
+        if (i > 0 && !(zs >= 0 && i == zs + zl) && !put_char(out, cap, &n, ':')) return 0;
         {
             char tmp[8];
             int k = 0, lead = (int)rnd(2);
@@ -142,13 +157,16 @@ static size_t gen_valid(char* out, size_t cap) {
             while (lead-- > 0 && k < 4) tmp[k++] = '0';
             while (k > 0) {
                 char c = tmp[--k];
-                out[n++] = (rnd(2) && c >= 'a') ? (char)(c - 32) : c;
+                if (!put_char(out, cap, &n, (rnd(2) && c >= 'a') ? (char)(c - 32) : c)) return 0;
             }
         }
     }
     if (dotted) {
-        if (!(zs >= 0 && zs + zl == ngroups)) out[n++] = ':';
-        n += (size_t)snprintf(out + n, cap - n, "%u.%u.%u.%u", rnd(256), rnd(256), rnd(256), rnd(256));
+        char v4[16];
+        int w = snprintf(v4, sizeof v4, "%u.%u.%u.%u", rnd(256), rnd(256), rnd(256), rnd(256));
+        if (w < 0 || (size_t)w >= sizeof v4) return 0;
+        if (!(zs >= 0 && zs + zl == ngroups) && !put_char(out, cap, &n, ':')) return 0;
+        if (!put_text(out, cap, &n, v4)) return 0;
     }
     out[n] = '\0';
     return n;
