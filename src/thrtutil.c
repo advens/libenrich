@@ -2904,14 +2904,24 @@ static void build_ip_accel(void) {
     }
 }
 
+/* 32 bits per string keeps the false positive rate near 0.07 % with three
+ * probes. A power of two, so readers index it with a mask, at least 64 Kbit
+ * and at most BLOOM_BITS_DEFAULT, which large databases keep. */
+static uint32_t bloom_bits_for(size_t strings) {
+    uint64_t want = (uint64_t)strings * 32u, bits = 1u << 16;
+    while (bits < want && bits < BLOOM_BITS_DEFAULT) bits <<= 1;
+    return (uint32_t)bits;
+}
+
 static void build_bloom(void) {
+    bloom_size_bits = bloom_bits_for(str_db.count);
     bloom_filter = xcalloc(1, bloom_size_bits / 8);
     for (size_t i = 0; i < str_db.count; i++) {
         uint64_t h = str_db.items[i].hash;
         uint32_t h1 = (uint32_t)h;
         uint32_t h2 = thrt_bloom_h2(h1);
         for (int k = 0; k < 3; k++) {
-            uint32_t bit_idx = (h1 + k * h2) % bloom_size_bits;
+            uint32_t bit_idx = (h1 + k * h2) & (bloom_size_bits - 1);
             bloom_filter[bit_idx / 8] |= (1 << (bit_idx & 7));
         }
     }

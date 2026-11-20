@@ -6,7 +6,7 @@
  *                     FUZZ_SEED. The CRC is recomputed, so the layout and
  *                     index checks behind it are what gets exercised. A file
  *                     that passes them is looked up.
- *                     The seed's bloom filter (8 MB in every build) is
+ *                     The seed's bloom filter (up to 8 MB) is
  *                     cut out first, so a run copies and checks a few
  *                     hundred KB instead; FUZZ_KEEP_BLOOM=1 keeps it.
  *   FUZZ_TARGET=ovly  The input is an overlay file. Its CRC trailer is

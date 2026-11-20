@@ -60,6 +60,11 @@ static __attribute__((unused)) int thrt_validate(const unsigned char *base, size
                THRT_VERSION);
         return THRT_VALID_EVERSION;
     }
+    /* The readers index the bloom filter with a mask. */
+    if (h->bloom_size_bits != 0 && (h->bloom_size_bits < 64 || (h->bloom_size_bits & (h->bloom_size_bits - 1)) != 0)) {
+        thrt_valid_err(err, err_len, "%s: bloom filter of %u bits, not a power of two", path, h->bloom_size_bits);
+        return THRT_VALID_EFORMAT;
+    }
     if (h->total_size != (uint64_t)size) {
         thrt_valid_err(err, err_len, "%s: size %zu, header says %llu", path, size, (unsigned long long)h->total_size);
         return THRT_VALID_EFORMAT;
