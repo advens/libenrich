@@ -161,6 +161,69 @@ static int forge(const char *prefix, uint32_t target, char *out, size_t out_sz) 
 }
 
 /* ------------------------------------------------------------------------
+ * A printable domain with a chosen CRC32C: the prefix, 40 letters each 'a'
+ * or 'b', then ".example". For a fixed length the CRC is affine over GF(2)
+ * in the a/b choices, so they solve a 32x40 linear system.
+ * ------------------------------------------------------------------------ */
+#define AB_LEN 40
+static int forge_ab(const char *prefix, uint32_t target, char *out, size_t out_sz) {
+    static const char tail[] = ".example";
+    size_t pl = strlen(prefix), n = pl + AB_LEN + sizeof tail - 1;
+    uint64_t aug[32] = {0};
+    uint32_t base;
+    int piv[32], r = 0;
+    if (n + 1 > out_sz) return -1;
+    memcpy(out, prefix, pl);
+    memset(out + pl, 'a', AB_LEN);
+    memcpy(out + pl + AB_LEN, tail, sizeof tail);
+    base = crc_of(out, n);
+    for (int j = 0; j < AB_LEN; j++) {
+        uint32_t col;
+        out[pl + j] = 'b';
+        col = crc_of(out, n) ^ base;
+        out[pl + j] = 'a';
+        for (int i = 0; i < 32; i++)
+            if (col >> i & 1u) aug[i] |= 1ULL << j;
+    }
+    for (int i = 0; i < 32; i++) aug[i] |= (uint64_t)((target ^ base) >> i & 1u) << AB_LEN;
+    for (int c = 0; c < AB_LEN && r < 32; c++) {
+        int p = -1;
+        for (int k = r; k < 32; k++)
+            if (aug[k] >> c & 1u) {
+                p = k;
+                break;
+            }
+        if (p < 0) continue;
+        uint64_t t = aug[p];
+        aug[p] = aug[r];
+        aug[r] = t;
+        for (int k = 0; k < 32; k++)
+            if (k != r && (aug[k] >> c & 1u)) aug[k] ^= aug[r];
+        piv[r++] = c;
+    }
+    for (int k = r; k < 32; k++)
+        if (aug[k] >> AB_LEN & 1u) return -1;
+    for (int k = 0; k < r; k++)
+        if (aug[k] >> AB_LEN & 1u) out[pl + piv[k]] = 'b';
+    return crc_of(out, n) == target ? 0 : -1;
+}
+
+/* A feed of n domains sharing the CRC32C of victim.example, then that
+ * domain from another feed, as CSV on stdout. */
+static int write_collisions(int n) {
+    uint32_t target = crc_of("victim.example", 14);
+    char v[128], prefix[32];
+    for (int k = 0, made = 0; made < n && k < 100000; k++) {
+        snprintf(prefix, sizeof prefix, "c%05d-", k);
+        if (forge_ab(prefix, target, v, sizeof v) != 0) continue;
+        printf("domain,%s,50,malware,crafted,green\n", v);
+        made++;
+    }
+    printf("domain,victim.example,90,phishing,honest,green\n");
+    return 0;
+}
+
+/* ------------------------------------------------------------------------
  * A small .prev written field by field.
  * ------------------------------------------------------------------------ */
 static int write_prev(const char *path) {
@@ -645,8 +708,9 @@ static void test_reload_under_load(void) {
 }
 
 int main(int argc, char **argv) {
+    if (argc == 3 && strcmp(argv[1], "--collide") == 0) return write_collisions(atoi(argv[2]));
     if (argc < 2) {
-        fprintf(stderr, "usage: %s <build/api directory>\n", argv[0]);
+        fprintf(stderr, "usage: %s <build/api directory> | --collide <n>\n", argv[0]);
         return 2;
     }
     snprintf(g_dir, sizeof g_dir, "%s", argv[1]);
