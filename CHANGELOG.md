@@ -10,6 +10,19 @@ The frozen surfaces are the C ABI and the on-disk `.thrt`, `.ovly`, and
 
 ## [Unreleased]
 
+## [1.1.4] - 2026-11-20
+
+PATCH: faster string lookups, a bloom filter sized to the database,
+and a fuzz target for `.prev` files. The C ABI and the SONAME
+(`libenrich.so.1`) are unchanged. The `.thrt` layout is unchanged; the
+reader now also refuses a bloom filter size no builder ever wrote.
+
+### Added
+
+- The fuzz harness covers `.prev` files (`FUZZ_TARGET=prev`), and the
+  `.thrt` target cuts the bloom filter out of its seed, so a run checks
+  a few hundred KB instead of the whole file.
+
 ### Changed
 
 - String lookups find the bloom filter bits with a mask instead of a
