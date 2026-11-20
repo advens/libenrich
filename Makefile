@@ -11,14 +11,14 @@ PREFIX    ?= /usr/local
 DESTDIR   ?=
 LIB_MAJOR := 1
 LIB_MINOR := 1
-LIB_PATCH := 2
+LIB_PATCH := 3
 SONAME    := libenrich.so.$(LIB_MAJOR)
 SOFILE    := libenrich.so.$(LIB_MAJOR).$(LIB_MINOR).$(LIB_PATCH)
 
 CC        ?= cc
 AR        ?= ar
 CSTD      := -std=c11
-WARN      := -Wall -Wextra -Wpedantic
+WARN      := -Wall -Wextra -Wpedantic -Winline
 HARDEN    := -fstack-protector-strong -D_FORTIFY_SOURCE=2
 OPT       := -O2
 THREADS   := -pthread
@@ -149,7 +149,7 @@ $(BUILDDIR)/test_thrt_ipparse: $(SRCDIR)/test_thrt_ipparse.c | $(BUILDDIR)
 	$(CC) $(CFLAGS) -Werror -o $@ $(SRCDIR)/test_thrt_ipparse.c
 
 $(BUILDDIR)/test_prev: $(SRCDIR)/test_prev.c | $(BUILDDIR)
-	$(CC) $(CFLAGS) -o $@ $(SRCDIR)/test_prev.c
+	$(CC) $(CFLAGS) -Werror -o $@ $(SRCDIR)/test_prev.c
 
 $(BUILDDIR)/test_enrich_api: $(SRCDIR)/test_enrich_api.c $(SRCDIR)/enrich_lib.c $(SRCDIR)/enrich_version.c \
 		$(LIB_HEADERS) | $(BUILDDIR)

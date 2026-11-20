@@ -10,6 +10,12 @@ The frozen surfaces are the C ABI and the on-disk `.thrt`, `.ovly`, and
 
 ## [Unreleased]
 
+## [1.1.3] - 2026-11-20
+
+PATCH: the builder refuses a string table a lookup cannot walk, and the
+IPv6 parser and two builder helpers build under -Winline. The C ABI,
+the SONAME (`libenrich.so.1`), and the on-disk formats are unchanged.
+
 ### Security
 
 - The builder refuses a string table where an entry sits 128 or more
@@ -20,6 +26,19 @@ The frozen surfaces are the C ABI and the on-disk `.thrt`, `.ovly`, and
   holding the run, and keeps the previous database. Natural tables stay
   far below the bound (14 slots at most on a 2.3 million string build).
   Lookups and the on-disk format are unchanged.
+
+### Fixed
+
+- 1.1.2's `thrt_ipv6_strict()` was `static inline` and too large for
+  GCC to inline at -O2; rsyslog, which builds these sources with
+  `-Winline -Werror`, stopped there. It is `static` and marked unused,
+  as `parse_prefix_len()`, `ioc_type_is_ip()`, `prev_table_map()`,
+  `prev_lookup()` and `prev_hash()` are now too. An IPv6
+  lookup did not slow down: 177 ns against 262 ns for 1.1.2 on an M1.
+- `-Winline` is part of the library's warning flags, so the tests,
+  built with `-Werror` (`test_prev` too, now), catch a header function
+  the compiler will not inline before a project that vendors the header
+  does.
 
 ## [1.1.2] - 2026-11-19
 

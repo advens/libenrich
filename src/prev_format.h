@@ -131,7 +131,7 @@ static inline uint64_t prev_hash_n(const uint64_t sip_key[2], const char* s, siz
     return h == 0 ? 1 : h;
 }
 
-static inline uint64_t prev_hash(const uint64_t sip_key[2], const char* s) {
+static __attribute__((unused)) uint64_t prev_hash(const uint64_t sip_key[2], const char* s) {
     return prev_hash_n(sip_key, s, strlen(s));
 }
 
@@ -162,7 +162,7 @@ static inline uint32_t prev_lookup_n(const prev_header_t* h, const prev_entry_t*
     return 0;
 }
 
-static inline uint32_t prev_lookup(const prev_header_t* h, const prev_entry_t* table, uint32_t slots,
+static __attribute__((unused)) uint32_t prev_lookup(const prev_header_t* h, const prev_entry_t* table, uint32_t slots,
                                    const char* key, uint16_t* edge_out, uint16_t* src_out) {
     return prev_lookup_n(h, table, slots, key, key ? strlen(key) : 0, edge_out, src_out);
 }
@@ -170,7 +170,7 @@ static inline uint32_t prev_lookup(const prev_header_t* h, const prev_entry_t* t
 /* Validate a mapped region as a prev table; returns the entry array (and slot
  * count via *slots_out) on success, NULL on any structural problem: magic,
  * version, power-of-two slots, entries inside the mapping. */
-static inline const prev_entry_t* prev_table_map(const void* base, size_t map_len, uint32_t* slots_out) {
+static __attribute__((unused)) const prev_entry_t* prev_table_map(const void* base, size_t map_len, uint32_t* slots_out) {
     const prev_header_t* h;
     uint32_t slots;
     if (base == NULL || map_len < sizeof(prev_header_t)) return NULL;

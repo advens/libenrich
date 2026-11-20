@@ -90,7 +90,7 @@ static const unsigned char thrt_hexval[256] = {
  * read by thrt_ipv4_strict, nothing else. No zone: macOS takes a "%zone"
  * suffix the others refuse. Parsed here rather than by the libc, whose
  * inet_pton costs 190 to 300 ns per address on the hot path. */
-static inline int thrt_ipv6_strict(const char* s, size_t len, uint8_t out[16]) {
+static __attribute__((unused)) int thrt_ipv6_strict(const char* s, size_t len, uint8_t out[16]) {
     uint8_t tmp[16];
     size_t tp = 0, i = 0, curtok;
     int colonp = -1, saw_xdigit = 0, ndig = 0;
@@ -159,7 +159,7 @@ static inline int thrt_ipv6_strict(const char* s, size_t len, uint8_t out[16]) {
 /* Parse a full decimal prefix length. Returns 1 and sets *out only when the
  * whole suffix is digits and the value is within [0, max]. Rejects an empty
  * suffix, a leading sign or space, trailing junk, and out-of-range values. */
-static inline int parse_prefix_len(const char* s, int max, int* out) {
+static __attribute__((unused)) int parse_prefix_len(const char* s, int max, int* out) {
     char* end;
     long v;
     if (!s || !isdigit((unsigned char)*s)) return 0;
@@ -245,7 +245,7 @@ static __attribute__((unused)) int parse_ip_or_cidr(const char* value, int allow
 
 /* Declared IOC types whose value is an address. An absent or empty type means
  * the producer did not classify the value, so shape detection decides. */
-static inline int ioc_type_is_ip(const char* type) {
+static __attribute__((unused)) int ioc_type_is_ip(const char* type) {
     if (!type || !*type) return 1;
     return strcasecmp(type, "ip") == 0 || strcasecmp(type, "cidr") == 0 || strcasecmp(type, "ipv4") == 0 ||
            strcasecmp(type, "ipv6") == 0 || strcasecmp(type, "ip-range") == 0 || strcasecmp(type, "net") == 0 ||
