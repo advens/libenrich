@@ -160,6 +160,7 @@ $(BUILDDIR)/test_enrich_api: $(SRCDIR)/test_enrich_api.c $(SRCDIR)/enrich_lib.c 
 # libFuzzer (Apple clang does not). Run, from build/:
 #   FUZZ_TARGET=ovly ./fuzz_enrich -max_total_time=60 <corpus dir>
 #   FUZZ_TARGET=thrt FUZZ_SEED=api/threat.thrt ./fuzz_enrich -max_len=64 -max_total_time=60 <corpus dir>
+#   FUZZ_TARGET=prev ./fuzz_enrich -max_total_time=60 <corpus dir>
 FUZZ_CC ?= clang
 fuzz: | $(BUILDDIR)
 	$(FUZZ_CC) $(CSTD) $(ARCHFLAGS) -I$(SRCDIR) -O1 -g $(THREADS) \
