@@ -10,6 +10,20 @@ The frozen surfaces are the C ABI and the on-disk `.thrt`, `.ovly`, and
 
 ## [Unreleased]
 
+### Changed
+
+- String lookups find the bloom filter bits with a mask instead of a
+  division. On FreeBSD amd64 (i9-13900H, one pinned core, five
+  alternated runs) a domain lookup drops from 57.4 to 55.7 ns and a
+  SHA-256 lookup from 42.4 to 38.6 ns; an M1 shows no difference. The
+  probes are the same bits, so existing files read the same.
+- The builder sizes the bloom filter to the database: 32 bits per
+  string, a power of two from 64 Kbit up to the former fixed 64 Mbit.
+  A database of a few thousand strings shrinks from 8.9 MB to 550 KB.
+  A database past about two million strings keeps 64 Mbit.
+- The reader refuses a bloom filter whose size is not a power of two.
+  Every builder release wrote 64 Mbit, so no existing file is refused.
+
 ## [1.1.3] - 2026-11-20
 
 PATCH: the builder refuses a string table a lookup cannot walk, and the

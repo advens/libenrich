@@ -133,6 +133,7 @@ typedef struct {
     const void *accel;
     thrt_hash_entry_t *ht;
     const uint8_t *bloom;
+    uint32_t bloom_mask; /* bloom_size_bits - 1, a power of two checked at load */
     const char *pool;
     size_t pool_size;
     const thrt_feed_entry_t *feeds;
@@ -222,6 +223,7 @@ static int thrt_db_load(const char *path, thrt_db_t **out, char *err, size_t err
     d->accel = b + h->offset_ip_accel;
     d->ht = (thrt_hash_entry_t *)(void *)(b + h->offset_hashtable);
     d->bloom = h->bloom_size_bits ? b + h->offset_bloom : NULL;
+    d->bloom_mask = h->bloom_size_bits - 1u;
     d->pool = (const char *)b + h->offset_strings;
     d->pool_size = size - h->offset_strings;
     d->feeds = (const thrt_feed_entry_t *)(const void *)(b + h->offset_feeds);
@@ -681,6 +683,19 @@ static int classify(const char *v, size_t len, query_t *q) {
     return ENRICH_OK;
 }
 
+/* thrt_bloom_check() with a mask instead of a division. The probes are
+ * the bits the builder set: its 32-bit sums wrap modulo 2^32, a multiple
+ * of the filter size. */
+static inline int bloom_maybe(const thrt_db_t *d, uint64_t hash) {
+    uint32_t h1 = (uint32_t)hash, h2 = thrt_bloom_h2(h1), m = d->bloom_mask, i;
+    i = h1 & m;
+    if (!(d->bloom[i >> 3] & (1u << (i & 7)))) return 0;
+    i = (h1 + h2) & m;
+    if (!(d->bloom[i >> 3] & (1u << (i & 7)))) return 0;
+    i = (h1 + (h2 << 1)) & m;
+    return (d->bloom[i >> 3] & (1u << (i & 7))) != 0;
+}
+
 /* thrt_lookup_string() for a counted value. Offsets were validated at
  * load, and the compare stays inside the pool. The builder keeps every
  * entry within THRT_PROBE_MAX slots of its home slot. */
@@ -750,7 +765,7 @@ static int resolve(const enrich_snap_t *s, uint32_t opt_flags, const char *v, si
         priv = thrt_is_private_ipv6(q->v6);
         if (d) m = thrt_lookup_ipv6(d->v6, (int)d->hdr->ipv6_range_count, d->meta, q->v6);
     } else if (d) {
-        if (d->bloom == NULL || thrt_bloom_check(d->bloom, d->hdr->bloom_size_bits, q->hash))
+        if (d->bloom == NULL || bloom_maybe(d, q->hash))
             m = thrt_find_string(d, v, len, q->hash);
     }
     if (priv) out->flags |= ENRICH_R_PRIVATE;
@@ -812,7 +827,7 @@ size_t enrich_lookup_batch(const enrich_snap_t *s, uint32_t opt_flags, const enr
         for (size_t i = 0; i < m; i++) {
             qrc[i] = classify(v[base + i].value, v[base + i].len, &q[i]);
             if (qrc[i] == ENRICH_OK && q[i].kind == ENRICH_KIND_STRING && d && d->bloom) {
-                uint32_t bit = (uint32_t)q[i].hash % d->hdr->bloom_size_bits;
+                uint32_t bit = (uint32_t)q[i].hash & d->bloom_mask;
                 PREFETCH(&d->bloom[bit >> 3]);
             }
         }

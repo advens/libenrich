@@ -571,6 +571,9 @@ static void test_bad_files(void) {
     /* An index out of its table, with a valid CRC. */
     CHECK(corrupt_copy(path_of("threat.thrt"), bad, (size_t)h.offset_ipv4 + 8, 0x7FFFFFFFu, 1) == 0);
     CHECK(enrich_open(&e, &o, err, sizeof err) == ENRICH_EFORMAT && e == NULL);
+    /* A bloom filter size the readers cannot mask, with a valid CRC. */
+    CHECK(corrupt_copy(path_of("threat.thrt"), bad, offsetof(thrt_header_t, bloom_size_bits), 3000000u, 1) == 0);
+    CHECK(enrich_open(&e, &o, err, sizeof err) == ENRICH_EFORMAT && e == NULL);
     /* Another version. */
     CHECK(corrupt_copy(path_of("threat.thrt"), bad, 4, 4, 1) == 0);
     CHECK(enrich_open(&e, &o, err, sizeof err) == ENRICH_EVERSION && e == NULL);
