@@ -3222,6 +3222,37 @@ static void apply_delete_set(void) {
     str_db.count = w;
 }
 
+/* The string hash is CRC32C, which anyone can steer: a feed can ship
+ * values whose home slots pile up on the slot of a value another feed
+ * lists, and push it past the THRT_PROBE_MAX slots a lookup walks. Such
+ * a value would be in the file and never found. A table like that is not
+ * written. The run of occupied slots around the entry is counted per
+ * feed, so the error names the feed that filled it. */
+static void report_probe_run(const thrt_hash_entry_t *ht, uint32_t slots, uint32_t at, uint32_t dist) {
+    uint32_t mask = slots - 1, lo = at, n = 0;
+    size_t per_feed[MAX_FEEDS] = {0};
+    fprintf(stderr, "%sA string sits %u slots from its home slot; lookups stop at %d.\n", ICON_WARN, dist,
+            THRT_PROBE_MAX);
+    while (ht[(lo - 1) & mask].meta_idx != 0xFFFFFFFFu && n < slots) {
+        lo = (lo - 1) & mask;
+        n++;
+    }
+    n = 0;
+    for (uint32_t i = lo; ht[i].meta_idx != 0xFFFFFFFFu && n < slots; i = (i + 1) & mask, n++) {
+        uint64_t fm = meta_db.items[ht[i].meta_idx].feed_mask;
+        for (int b = 0; b < MAX_FEEDS; b++)
+            if (fm >> b & 1u) per_feed[b]++;
+    }
+    fprintf(stderr, "  The run of %u occupied slots holds values from:\n", n);
+    for (size_t i = 0; i < feed_db.count; i++) {
+        uint8_t b = feed_db.items[i].feed_idx;
+        if (b < MAX_FEEDS && per_feed[b] > 0)
+            fprintf(stderr, "    %-32s %zu\n", feed_db.items[i].name, per_feed[b]);
+    }
+    fprintf(stderr, "  Values whose hashes collide like this are crafted. Drop the feed that\n"
+                    "  holds most of them and build again. The previous database is kept.\n");
+}
+
 static void write_thrt(const char *filename) {
     char tmp_filename[PATH_MAX + 32];
     FILE *f;
@@ -3260,11 +3291,20 @@ static void write_thrt(const char *filename) {
 
     for (size_t i = 0; i < str_db.count; i++) {
         uint64_t h = str_db.items[i].hash;
-        uint32_t idx = (uint32_t)h & (hash_slots - 1);
-        while (ht[idx].meta_idx != 0xFFFFFFFF) idx = (idx + 1) & (hash_slots - 1);
+        uint32_t idx = (uint32_t)h & (hash_slots - 1), dist = 0;
+        while (ht[idx].meta_idx != 0xFFFFFFFF) {
+            idx = (idx + 1) & (hash_slots - 1);
+            dist++;
+        }
         ht[idx].hash_key = h;
         ht[idx].string_offset = str_db.items[i].offset;
         ht[idx].meta_idx = str_db.items[i].meta_idx;
+        if (dist >= THRT_PROBE_MAX) {
+            report_probe_run(ht, hash_slots, idx, dist);
+            fclose(f);
+            unlink(tmp_filename);
+            exit(1);
+        }
     }
 
     /* Calculate offsets */

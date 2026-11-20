@@ -464,8 +464,8 @@ static inline thrt_metadata_t* thrt_lookup_string(
     uint32_t idx = (uint32_t)hash & mask;
     int probes = 0;
 
-    // Limit probes to avoid infinite loops on corrupted DBs
-    while (probes < 128) {
+    // The builder keeps every entry within THRT_PROBE_MAX of its home slot.
+    while (probes < THRT_PROBE_MAX) {
         thrt_hash_entry_t* entry = &table[idx];
 
         // 0xFFFFFFFF indicates an empty slot (End of Chain)

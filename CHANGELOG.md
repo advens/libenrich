@@ -10,6 +10,17 @@ The frozen surfaces are the C ABI and the on-disk `.thrt`, `.ovly`, and
 
 ## [Unreleased]
 
+### Security
+
+- The builder refuses a string table where an entry sits 128 or more
+  slots from its home slot, the distance a lookup walks before it gives
+  up. The string hash is CRC32C, so a feed could ship values whose home
+  slots pile up on the slot of a value another feed lists and make that
+  value unfindable, with no error. The build now fails, names the feeds
+  holding the run, and keeps the previous database. Natural tables stay
+  far below the bound (14 slots at most on a 2.3 million string build).
+  Lookups and the on-disk format are unchanged.
+
 ## [1.1.2] - 2026-11-19
 
 PATCH: IPv6 lookups are parsed without the libc, and the builder no

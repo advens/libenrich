@@ -31,6 +31,9 @@ tags do not get backports.
 
 - The `.thrt` reader rejects a bad magic or a version older than the one
   it writes.
+- The `.thrt` builder writes no string entry 128 or more slots from its
+  home slot (`THRT_PROBE_MAX`), the distance a lookup walks. A feed that
+  crafts CRC32C collisions fails the build instead of hiding a value.
 - The overlay reader rejects a bad magic, version, size, or trailing CRC32C.
 - The prevalence map rejects a bad magic, version, or bound. A checksum of
   zero is unset and is not verified.

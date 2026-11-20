@@ -682,11 +682,12 @@ static int classify(const char *v, size_t len, query_t *q) {
 }
 
 /* thrt_lookup_string() for a counted value. Offsets were validated at
- * load, and the compare stays inside the pool. */
+ * load, and the compare stays inside the pool. The builder keeps every
+ * entry within THRT_PROBE_MAX slots of its home slot. */
 static const thrt_metadata_t *thrt_find_string(const thrt_db_t *d, const char *v, size_t len, uint64_t hash) {
     uint32_t mask = d->hdr->hash_slots - 1;
     uint32_t idx = (uint32_t)hash & mask;
-    for (int probes = 0; probes < 128; probes++) {
+    for (int probes = 0; probes < THRT_PROBE_MAX; probes++) {
         const thrt_hash_entry_t *e = &d->ht[idx];
         if (e->meta_idx == 0xFFFFFFFFu) return NULL;
         if (e->hash_key == hash && len < d->pool_size - e->string_offset) {

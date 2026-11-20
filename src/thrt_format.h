@@ -38,6 +38,11 @@
 #define THRT_MAGIC 0x54485254  // "THRT" in ASCII
 #define THRT_VERSION 5
 
+/* A string lookup walks at most this many slots from the home slot. The
+ * builder refuses a table where an entry sits further away, so a lookup
+ * never gives up on a value the file holds. */
+#define THRT_PROBE_MAX 128
+
 /* ============================================================================
  * ENTRY TYPE FLAGS
  * Indicates which data sources contributed to this entry

@@ -116,4 +116,22 @@ if ./build/thrtutil -o "$tmpb/x.thrt" --apply-delta "$tmpb/clamp.csv" --generati
 fi
 rm -rf "$tmpb"
 
+# A feed can ship values whose CRC32C home slots pile up on the slot of a
+# value another feed lists, pushing it past the 128 slots a lookup walks.
+# The builder refuses that table and names the feed; under the bound the
+# value is found.
+tmpc=$(mktemp -d)
+./build/test_enrich_api --collide 100 >"$tmpc/near.csv"
+./build/thrtutil -o "$tmpc/near.thrt" "$tmpc/near.csv" >/dev/null
+printf '{"output": "%s/near.thrt"}\n' "$tmpc" >"$tmpc/near.json"
+./build/enrich -c "$tmpc/near.json" lookup victim.example | grep -q 'MATCH FOUND'
+./build/test_enrich_api --collide 200 >"$tmpc/over.csv"
+if ./build/thrtutil -o "$tmpc/over.thrt" "$tmpc/over.csv" >/dev/null 2>"$tmpc/over.err"; then
+    echo "a table with an entry past the probe bound must be refused" >&2
+    exit 1
+fi
+grep -q 'crafted  *129' "$tmpc/over.err"
+test ! -e "$tmpc/over.thrt"
+rm -rf "$tmpc"
+
 echo "docs/check.sh: ok"
