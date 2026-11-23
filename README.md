@@ -17,6 +17,11 @@ Feeds:
 database, the overlay and a prevalence table, validated on load,
 reloaded while readers run. The manual's Library section shows it.
 
+`enrichd` serves that API over HTTP: single and batch lookups with ECS
+field names, a MISP attribute search, and per-key TLP and grant
+filtering. It is optional and needs libmicrohttpd (`make enrichd`). The
+manual's Lookup service section documents it.
+
 ```
 make
 make test

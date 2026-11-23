@@ -4,6 +4,8 @@
 #   make test      ip parse, prevalence, lookup API, enrich build, docs
 #   make sanitize  lookup API under ASan+UBSan, then TSan
 #   make fuzz      libFuzzer harness for the loaders (FUZZ_CC=clang with libFuzzer)
+#   make enrichd   the HTTP lookup service (optional, needs libmicrohttpd)
+#   make test-enrichd  start enrichd on the test database and check it (curl, python3)
 #   make install   PREFIX (default /usr/local)
 #   make clean
 
@@ -24,6 +26,8 @@ OPT       := -O2
 THREADS   := -pthread
 JSON_CFLAGS ?= $(shell pkg-config --cflags libfastjson 2>/dev/null)
 JSON_LIBS   ?= $(shell pkg-config --libs libfastjson 2>/dev/null)
+MHD_CFLAGS  ?= $(shell pkg-config --cflags libmicrohttpd 2>/dev/null)
+MHD_LIBS    ?= $(shell pkg-config --libs libmicrohttpd 2>/dev/null)
 
 ARCH := $(shell uname -m)
 ifeq ($(ARCH),arm64)
@@ -61,7 +65,7 @@ SRCDIR := src
 BUILDDIR := build
 CFLAGS := $(CSTD) $(WARN) $(HARDEN) $(OPT) $(ARCHFLAGS) -fPIC -I$(SRCDIR)
 
-.PHONY: all test sanitize fuzz install clean
+.PHONY: all test sanitize fuzz install clean enrichd test-enrichd install-enrichd
 
 all: $(BUILDDIR)/$(SHLIB) $(BUILDDIR)/libenrich.a $(BUILDDIR)/enrich $(BUILDDIR)/thrtutil enrich.pc
 
@@ -124,6 +128,21 @@ $(BUILDDIR)/enrich: $(BUILDDIR)/enrich_cmd.o $(LIB_OBJS) \
 	$(CC) -o $@ $(BUILDDIR)/enrich_cmd.o $(LIB_OBJS) \
 		$(BUILDDIR)/thrtutil.o $(BUILDDIR)/thrt_cli.o \
 		$(BUILDDIR)/overlay_tool.o $(BUILDDIR)/prev_lookup.o $(JSON_LIBS) $(THREADS)
+
+# enrichd, the HTTP lookup service, is optional: it needs libmicrohttpd
+# and is not part of `all`. `make enrichd`, then `make test-enrichd`.
+enrichd: $(BUILDDIR)/enrichd
+
+$(BUILDDIR)/enrichd: $(SRCDIR)/enrichd.c $(SRCDIR)/enrichd_sha256.h $(LIB_HEADERS) $(LIB_OBJS) | $(BUILDDIR)
+	@test -n "$(JSON_LIBS)" || { echo "libfastjson is required" >&2; exit 1; }
+	@test -n "$(MHD_LIBS)" || { echo "enrichd needs libmicrohttpd (pkg-config libmicrohttpd)" >&2; exit 1; }
+	$(CC) $(CFLAGS) $(THREADS) $(JSON_CFLAGS) $(MHD_CFLAGS) -o $@ $(SRCDIR)/enrichd.c $(LIB_OBJS) \
+		$(JSON_LIBS) $(MHD_LIBS) $(THREADS)
+
+test-enrichd: $(BUILDDIR)/enrichd $(BUILDDIR)/enrich
+	rm -rf $(BUILDDIR)/api && mkdir -p $(BUILDDIR)/api
+	$(BUILDDIR)/enrich -c testdata/api/enrich.json build >/dev/null
+	sh docs/check-enrichd.sh $(BUILDDIR)
 
 test: $(BUILDDIR)/$(SHLIB) $(BUILDDIR)/enrich $(BUILDDIR)/thrtutil $(BUILDDIR)/test_thrt_ipparse \
 		$(BUILDDIR)/test_prev $(BUILDDIR)/test_enrich_api
@@ -200,6 +219,10 @@ install: all
 	sed -e 's|@PREFIX@|$(PREFIX)|g' \
 	    -e 's|@VERSION@|$(LIB_MAJOR).$(LIB_MINOR).$(LIB_PATCH)|g' \
 	    enrich.pc.in > $(DESTDIR)$(PCDIR)/enrich.pc
+
+install-enrichd: $(BUILDDIR)/enrichd
+	mkdir -p $(DESTDIR)$(PREFIX)/sbin
+	cp $(BUILDDIR)/enrichd $(DESTDIR)$(PREFIX)/sbin/
 
 clean:
 	rm -rf $(BUILDDIR) enrich.pc

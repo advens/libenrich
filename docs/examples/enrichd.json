@@ -1,0 +1,21 @@
+{
+  "listen": "127.0.0.1",
+  "port": 8470,
+  "threads": 4,
+  "thrt": "/var/db/enrich/threat.thrt",
+  "overlay": "/var/db/enrich/site.ovly",
+  "prev": "/var/db/enrich/site.prev",
+  "skip_private": true,
+  "reload_seconds": 30,
+  "keys": "/usr/local/etc/enrichd.keys",
+  "tls_cert": "/usr/local/etc/enrichd/cert.pem",
+  "tls_key": "/usr/local/etc/enrichd/key.pem",
+  "allow_plaintext": false,
+  "unmarked_tlp": "amber",
+  "max_batch": 1000,
+  "max_body": 1048576,
+  "max_connections": 256,
+  "per_ip_connections": 32,
+  "timeout_seconds": 10,
+  "access_log": false
+}
