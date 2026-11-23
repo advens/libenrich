@@ -10,6 +10,12 @@ The frozen surfaces are the C ABI and the on-disk `.thrt`, `.ovly`, and
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-11-23
+
+MINOR: `enrichd`, an optional HTTP lookup service over the library. The
+C ABI, the SONAME (`libenrich.so.1`) and the on-disk formats are
+unchanged. A build without libmicrohttpd is the same as 1.1.4.
+
 ### Added
 
 - `enrichd`, an HTTP lookup service over the library, built by
