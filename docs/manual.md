@@ -693,6 +693,167 @@ non-empty subset of the three paths; a rule engine can open the
 and ThreadSanitizer. `make fuzz` builds the libFuzzer harness
 `src/fuzz_enrich.c` (needs a clang with libFuzzer).
 
+## Lookup service
+
+`enrichd` answers lookups over HTTP from the same snapshot and policy as
+the library. It is optional: `make enrichd` needs libmicrohttpd
+(`pkg-config libmicrohttpd`), and `make install-enrichd` puts it in
+`$(PREFIX)/sbin`. It runs in the foreground and logs to stderr; the
+service manager starts it, keeps the log and runs it as an unprivileged
+user.
+
+```
+enrichd -c /usr/local/etc/enrichd.json      # serve
+enrichd -c /usr/local/etc/enrichd.json -t   # check config, keys, database
+openssl rand -hex 32 | tee key | enrichd -k # digest for the key file
+```
+
+### Config
+
+`docs/examples/enrichd.json` lists every key. An unknown key is an
+error.
+
+| Key | Default | |
+|-----|---------|-|
+| `listen` | `127.0.0.1` | numeric IPv4 or IPv6 address |
+| `port` | 8470 | |
+| `threads` | 4 | worker threads |
+| `thrt`, `overlay`, `prev` | | at least one; as `enrich_open()` takes them |
+| `skip_private` | true | `ENRICH_OPT_SKIP_PRIVATE` |
+| `reload_seconds` | 30 | stat the files and reload what changed; 0 turns it off |
+| `keys` | required | the API key file |
+| `tls_cert`, `tls_key` | | PEM files; libmicrohttpd must be built with TLS |
+| `allow_plaintext` | false | plain HTTP on an address that is not loopback |
+| `unmarked_tlp` | `amber` | the TLP a match without a marking is treated as |
+| `max_batch` | 1000 | values per request |
+| `max_body` | 1 MiB | request body bytes |
+| `max_connections` | 256 | |
+| `per_ip_connections` | 32 | 0 is no limit |
+| `timeout_seconds` | 10 | idle connection timeout |
+| `access_log` | false | one line per request: client, key name, route, status, count |
+
+Plain HTTP is refused off loopback unless `allow_plaintext` says a TLS
+proxy sits in front. The TLS key file must not be readable by group or
+other. The access log never holds a looked-up value. A database that
+fails to load at start is retried at each reload, and `/v1/health`
+answers 503 until it loads; `-t` fails instead.
+
+SIGHUP reloads the key file and the database. SIGTERM stops.
+
+### Keys
+
+One key per line: a name, the SHA-256 of the key in hex (`enrichd -k`),
+and optional grants, comma-separated.
+
+```
+# name        digest                                                            grants
+soc-misp      9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08  tlp:amber
+soar          2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae  tlp:red,restricted,context
+```
+
+| Grant | Shows |
+|-------|-------|
+| `tlp:clear` (default), `tlp:green`, `tlp:amber`, `tlp:red` | public CTI whose strictest marking is at most this |
+| `restricted` | the score of a restricted CTI match, never its feed, marking or labels |
+| `context` | tags, overlay tags, overlay add entries, the whitelist disposition, prevalence |
+
+A request sends `Authorization: Bearer <key>`, or `Authorization: <key>`
+as MISP clients do. A key is 32 to 512 characters. The file holds
+digests, not keys, and must not be writable by group or other. Every
+digest is compared on each request, so the time does not depend on
+which key matched.
+
+What a key may not see is removed before the response is built. A
+match it may not see is a miss: `matched` is false and nothing of it
+is returned. A full whitelist in the overlay is a miss for every key.
+
+### API
+
+| Request | |
+|---------|-|
+| `GET /v1/health` | no key; 200 `{"status":"ok"}` once a database is loaded, else 503 |
+| `GET /v1/db` | library version, snapshot generation, sizes and mtimes |
+| `GET /v1/lookup/<value>` | one value, percent-encoded; `GET /v1/lookup?value=` is the same |
+| `POST /v1/lookup` | `{"values": ["...", ...]}`, at most `max_batch` |
+| `POST /attributes/restSearch` | MISP attribute search, below |
+
+A value is used as given: no trimming, no case folding. `%00`, a bad
+escape, and a value longer than 4096 bytes are refused with 400.
+
+A result:
+
+```json
+{
+  "value": "evil.example",
+  "matched": true,
+  "threat": {
+    "indicator": {
+      "type": "domain-name",
+      "confidence": "High",
+      "marking": {"tlp": "AMBER"},
+      "provider": ["pubfeed"]
+    },
+    "feed": {"name": ["pubfeed"]}
+  },
+  "enrich": {
+    "cti": {"confidence": 70, "categories": ["malware"], "tlp": ["amber"], "feeds": ["pubfeed"]}
+  }
+}
+```
+
+`threat` uses ECS names. `threat.indicator.type` comes from the value:
+an address is `ipv4-addr` or `ipv6-addr`, 32, 40, 64 or 128 hex digits
+are `file`, a value with `://` is `url`, one with `@` and no `/` is
+`email-addr`, anything else is `domain-name`. `confidence` is the best
+score the key may see, on the STIX 2.1 scale: 0 None, 1 to 29 Low, 30
+to 69 Medium, 70 to 100 High. `marking` and `provider` describe public
+CTI only.
+
+`enrich` has the detail in the shape mmenrich writes per field
+(`cti` with `confidence`, `categories`, `tlp`, `feeds`, `labels`), plus,
+as the grants allow, `restricted.confidence`, `overlay` (an add entry:
+`confidence`, `categories`), `tags`, `overlay_tags`,
+`disposition: "allowed"` (a soft whitelist), `prevalence` (`count`,
+`edges`, `sources`), and `private: true` for a private address.
+
+A batch answers `{"generation": N, "results": [...]}` in request order.
+A value the library refuses gives `{"error": "..."}` in its place.
+
+### MISP search
+
+`POST /attributes/restSearch` (or `/attributes/restSearch/json`) takes a
+MISP search body, flat or under `"request"`. `value` is a string or a
+list, matched exactly. A value that starts with `!` or starts or ends
+with `%` is refused with 400: wildcards and negation are not supported,
+and a silent miss would be worse. `returnFormat` must be `json` when
+present. Other filters are ignored.
+
+The answer is `{"response": {"Attribute": [...]}}` with one attribute
+per value the key sees as a match. `type` is `ip-dst`, `domain`, `url`,
+`email-src`, `md5`, `sha1`, `sha256` or `sha512`; `category` is
+`Payload delivery` for a hash and `Network activity` otherwise;
+`timestamp` is the database mtime; `id` and `event_id` are `"0"`. Tags
+carry the rest: `tlp:<marking>`, `enrich:confidence="N"`,
+`enrich:feed="<name>"`, `enrich:category="<name>"`, the labels the
+source attached, and `enrich:restricted` or `enrich:overlay` when those
+parts matched.
+
+### Limits and numbers
+
+Request bodies stop at `max_body` (413, before the body is read when
+`Content-Length` says so), JSON bodies at a depth of 8, connections at
+`max_connections` and `per_ip_connections`, idle connections at
+`timeout_seconds`. Headers and the URL fit the libmicrohttpd connection
+memory (32 KB).
+
+On an M1, 4 threads, `ab -k -c 16` on the same host: 80 000 single
+lookups per second, 32 000 batches of 100 values per second, no
+failure. `ab` runs on one core, so these are floors.
+
+`make test-enrichd` starts `enrichd` on `testdata/api` and checks each
+grant, the bounds, the MISP search and a reload (`docs/check-enrichd.sh`,
+needs curl and python3).
+
 ## Not built here
 
 A prevalence table (`.prev`) is not a feed. This tool does not download

@@ -10,6 +10,22 @@ The frozen surfaces are the C ABI and the on-disk `.thrt`, `.ovly`, and
 
 ## [Unreleased]
 
+### Added
+
+- `enrichd`, an HTTP lookup service over the library, built by
+  `make enrichd` when libmicrohttpd is present and not part of `all`.
+  `GET /v1/lookup/<value>` and `POST /v1/lookup` answer with ECS
+  `threat.indicator.*` fields and the detail mmenrich writes;
+  `POST /attributes/restSearch` answers MISP attribute searches on
+  exact values. Each API key has a TLP clearance and the `restricted`
+  and `context` grants, and what a key may not see is removed on the
+  server. The key file holds SHA-256 digests, and keys are compared
+  without an early exit. Bodies, batches, JSON depth, connections and
+  idle time are bounded, `%00` in a value is refused, plain HTTP is
+  refused off loopback, and the access log never holds a value. The
+  database reloads while requests run. `make test-enrichd` checks it;
+  CI runs it on Linux and macOS.
+
 ## [1.1.4] - 2026-11-20
 
 PATCH: faster string lookups, a bloom filter sized to the database,
