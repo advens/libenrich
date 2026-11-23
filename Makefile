@@ -12,8 +12,8 @@
 PREFIX    ?= /usr/local
 DESTDIR   ?=
 LIB_MAJOR := 1
-LIB_MINOR := 1
-LIB_PATCH := 4
+LIB_MINOR := 2
+LIB_PATCH := 0
 SONAME    := libenrich.so.$(LIB_MAJOR)
 SOFILE    := libenrich.so.$(LIB_MAJOR).$(LIB_MINOR).$(LIB_PATCH)
 
