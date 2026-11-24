@@ -691,7 +691,10 @@ non-empty subset of the three paths; a rule engine can open the
 `make test` runs `src/test_enrich_api.c` against `testdata/api`.
 `make sanitize` runs it under AddressSanitizer, UndefinedBehaviorSanitizer
 and ThreadSanitizer. `make fuzz` builds the libFuzzer harness
-`src/fuzz_enrich.c` (needs a clang with libFuzzer).
+`src/fuzz_enrich.c` for the three loaders, and `make fuzz-enrichd`
+builds `src/fuzz_enrichd.c` for enrichd's request handling and key
+file parser. Both need a clang with libFuzzer; the comment at the top
+of each file says how to run it.
 
 ## Lookup service
 

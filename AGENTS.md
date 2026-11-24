@@ -24,8 +24,9 @@ on one arch is incomplete.
 `src/enrich.h`, `src/enrich_lib.c`, `src/enrich_cmd.c`,
 `src/enrich_version.c`, `src/thrtutil.c`, `src/thrt_cli.c`,
 `src/overlay_tool.c`, `src/prev_lookup.c`, `src/enrichd.c`,
-`src/enrichd_sha256.h`, the format headers, the
-tests and `src/fuzz_enrich.c`, `testdata/`, `Makefile`, `docs/`.
+`src/enrichd_sha256.h`, the format headers, the tests,
+`src/fuzz_enrich.c`, `src/fuzz_enrichd.c`, `testdata/`, `Makefile`,
+`docs/`.
 
 ## Not in
 
