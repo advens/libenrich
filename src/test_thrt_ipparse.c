@@ -1,4 +1,4 @@
-/* test_thrt_ipparse.c — the CTI range parser must never widen an indicator.
+/* test_thrt_ipparse.c: the CTI range parser must never widen an indicator.
  *
  * Copyright 2026 Advens.
  * Licensed under the Apache License, Version 2.0.

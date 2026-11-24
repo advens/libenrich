@@ -1,4 +1,4 @@
-/* test_prev.c — self-test for the fleet-prevalence lookup table (prev_format.h).
+/* test_prev.c: self-test for the prevalence lookup table (prev_format.h).
  *
  * Builds a table in memory exactly as the collector's Python writer will
  * (open-addressing insert with the same FNV-1a hashing + 0-is-empty rule),
@@ -135,7 +135,7 @@ int main(int argc, char** argv) {
     const prev_entry_t* mapped;
     uint32_t s2;
     prev_header_t bad;
-    /* Common fleet observables (high counts) + one rare-but-present. */
+    /* Common observables (high counts) and one rare-but-present. */
     struct {
         const char* k;
         uint32_t c;

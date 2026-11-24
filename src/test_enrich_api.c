@@ -473,7 +473,7 @@ static void test_prev_and_partial(void) {
     unsigned changed = 0;
     int rc;
 
-    snprintf(prev, sizeof prev, "%s", path_of("fleet.prev"));
+    snprintf(prev, sizeof prev, "%s", path_of("site.prev"));
     unlink(prev);
     o = (enrich_options_t){sizeof o, path_of("threat.thrt"), NULL, prev, 0};
 
