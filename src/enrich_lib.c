@@ -440,13 +440,14 @@ const enrich_snap_t *enrich_reader_enter(enrich_reader_t *r) {
     uint64_t g = atomic_load_explicit(&e->gp, memory_order_acquire);
     if (r->seen != g) {
         /* Publish the epoch before reading the snapshot pointer. The
-         * writer swaps the pointer before it scans the epochs, so either
-         * it sees this epoch or this load sees its new snapshot. */
-        atomic_store_explicit(&r->epoch, g, memory_order_relaxed);
-        atomic_thread_fence(memory_order_seq_cst);
+         * writer swaps the pointer before it scans the epochs, both
+         * seq_cst, and this store and the load below are seq_cst too, so
+         * either the writer sees this epoch or the load sees its new
+         * snapshot. */
+        atomic_store_explicit(&r->epoch, g, memory_order_seq_cst);
         r->seen = g;
     }
-    return atomic_load_explicit(&e->cur, memory_order_acquire);
+    return atomic_load_explicit(&e->cur, memory_order_seq_cst);
 }
 
 void enrich_reader_leave(enrich_reader_t *r) {
