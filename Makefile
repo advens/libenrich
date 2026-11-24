@@ -65,7 +65,7 @@ SRCDIR := src
 BUILDDIR := build
 CFLAGS := $(CSTD) $(WARN) $(HARDEN) $(OPT) $(ARCHFLAGS) -fPIC -I$(SRCDIR)
 
-.PHONY: all test sanitize fuzz install clean enrichd test-enrichd install-enrichd
+.PHONY: all test sanitize fuzz fuzz-enrichd install clean enrichd test-enrichd install-enrichd
 
 all: $(BUILDDIR)/$(SHLIB) $(BUILDDIR)/libenrich.a $(BUILDDIR)/enrich $(BUILDDIR)/thrtutil enrich.pc
 
@@ -185,6 +185,18 @@ fuzz: | $(BUILDDIR)
 	$(FUZZ_CC) $(CSTD) $(ARCHFLAGS) -I$(SRCDIR) -O1 -g $(THREADS) \
 		-fsanitize=fuzzer,address,undefined -fno-sanitize-recover=all \
 		-o $(BUILDDIR)/fuzz_enrich $(SRCDIR)/fuzz_enrich.c
+
+# libFuzzer harness for enrichd's request handling and key file parser.
+# Run, from the top after make test:
+#   FUZZ_THRT=build/api/threat.thrt FUZZ_OVERLAY=build/api/site.ovly \
+#     build/fuzz_enrichd -max_total_time=60 <corpus dir> testdata/fuzz/enrichd
+fuzz-enrichd: | $(BUILDDIR)
+	@test -n "$(JSON_LIBS)" || { echo "libfastjson is required" >&2; exit 1; }
+	@test -n "$(MHD_LIBS)" || { echo "enrichd needs libmicrohttpd (pkg-config libmicrohttpd)" >&2; exit 1; }
+	$(FUZZ_CC) $(CSTD) $(ARCHFLAGS) -I$(SRCDIR) -O1 -g $(THREADS) $(JSON_CFLAGS) $(MHD_CFLAGS) \
+		-fsanitize=fuzzer,address,undefined -fno-sanitize-recover=all \
+		-o $(BUILDDIR)/fuzz_enrichd $(SRCDIR)/fuzz_enrichd.c $(SRCDIR)/enrich_lib.c $(SRCDIR)/enrich_version.c \
+		$(JSON_LIBS) $(MHD_LIBS)
 
 # The API test again under AddressSanitizer and UndefinedBehaviorSanitizer,
 # then ThreadSanitizer. Needs the fixtures `make test` builds.

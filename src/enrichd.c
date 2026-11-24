@@ -336,20 +336,13 @@ static void keys_free(keyset_t *ks) {
     free(ks);
 }
 
-static keyset_t *keys_load(const char *path, char *err, size_t err_len) {
-    struct stat st;
-    size_t len;
+/* Parse the key file text (len bytes, NUL-terminated). Takes text and
+ * frees it. path only names the file in errors. */
+static keyset_t *keys_parse(char *text, size_t len, const char *path, char *err, size_t err_len) {
     char line_err[256];
-    char *text = read_file(path, ENRICHD_KEYFILE_MAX, &len, &st, err, err_len);
     keyset_t *ks;
     char *save = NULL;
     unsigned lineno = 0;
-    if (text == NULL) return NULL;
-    if (st.st_mode & 022) {
-        snprintf(err, err_len, "%s is writable by group or other", path);
-        free(text);
-        return NULL;
-    }
     if (memchr(text, '\0', len) != NULL) {
         snprintf(err, err_len, "%s holds a NUL byte", path);
         free(text);
@@ -425,6 +418,19 @@ fail:
     free(text);
     keys_free(ks);
     return NULL;
+}
+
+static keyset_t *keys_load(const char *path, char *err, size_t err_len) {
+    struct stat st;
+    size_t len;
+    char *text = read_file(path, ENRICHD_KEYFILE_MAX, &len, &st, err, err_len);
+    if (text == NULL) return NULL;
+    if (st.st_mode & 022) {
+        snprintf(err, err_len, "%s is writable by group or other", path);
+        free(text);
+        return NULL;
+    }
+    return keys_parse(text, len, path, err, err_len);
 }
 
 /* Copy the grants of the key whose digest matches. Every entry is
@@ -923,14 +929,14 @@ static int authenticate(struct MHD_Connection *c, api_key_t *out) {
 }
 
 /* Parse a request body as one JSON object, all of it. */
-static struct json_object *parse_body(const req_t *rq) {
+static struct json_object *parse_body(const char *body, size_t len) {
     struct json_tokener *tok;
     struct json_object *o;
     size_t end;
-    if (rq->len == 0 || rq->len > INT32_MAX) return NULL;
+    if (len == 0 || len > INT32_MAX) return NULL;
     tok = fjson_tokener_new_ex(ENRICHD_JSON_DEPTH);
     if (tok == NULL) return NULL;
-    o = json_tokener_parse_ex(tok, rq->body, (int)rq->len);
+    o = json_tokener_parse_ex(tok, body, (int)len);
     if (o == NULL || fjson_tokener_get_error(tok) != fjson_tokener_success) {
         if (o) json_object_put(o);
         json_tokener_free(tok);
@@ -938,8 +944,8 @@ static struct json_object *parse_body(const req_t *rq) {
     }
     end = tok->char_offset < 0 ? 0 : (size_t)tok->char_offset;
     json_tokener_free(tok);
-    for (; end < rq->len; end++)
-        if (rq->body[end] != ' ' && rq->body[end] != '\n' && rq->body[end] != '\r' && rq->body[end] != '\t') {
+    for (; end < len; end++)
+        if (body[end] != ' ' && body[end] != '\n' && body[end] != '\r' && body[end] != '\t') {
             json_object_put(o);
             return NULL;
         }
@@ -1059,9 +1065,15 @@ static enum MHD_Result do_db(struct MHD_Connection *c) {
     return send_json(c, 200, o);
 }
 
-/* GET /v1/lookup/<value> and GET /v1/lookup?value=<value>. */
-static enum MHD_Result do_lookup_one(struct MHD_Connection *c, const api_key_t *k, const char *raw,
-                                     unsigned *status) {
+/* The responses below build a JSON document from the request and set
+ * *status. On an error they return NULL and set *err, except that a 500
+ * may come with neither. They do not touch the connection, so the fuzz
+ * harness calls them directly. */
+
+/* GET /v1/lookup/<value> and GET /v1/lookup?value=<value>. raw is still
+ * percent-encoded. */
+static struct json_object *resp_lookup_one(const api_key_t *k, const char *raw, unsigned *status,
+                                           const char **err) {
     enrich_reader_t *rd = thread_reader();
     const enrich_snap_t *s;
     enrich_result_t res;
@@ -1070,37 +1082,40 @@ static enum MHD_Result do_lookup_one(struct MHD_Connection *c, const api_key_t *
     char *val;
     long len;
     int st;
+    *status = 400;
     if (rawlen == 0) {
-        *status = 400;
-        return send_error(c, 400, "no value");
+        *err = "no value";
+        return NULL;
     }
     if (rawlen > 3 * (size_t)ENRICH_VALUE_MAX) {
-        *status = 400;
-        return send_error(c, 400, enrich_strerror(ENRICH_ETOOLONG));
+        *err = enrich_strerror(ENRICH_ETOOLONG);
+        return NULL;
     }
     if (rd == NULL) {
         *status = 503;
-        return send_error(c, 503, "no reader");
+        *err = "no reader";
+        return NULL;
     }
     val = malloc(rawlen + 1);
     if (val == NULL) {
         *status = 500;
-        return send_error(c, 500, "out of memory");
+        *err = "out of memory";
+        return NULL;
     }
     memcpy(val, raw, rawlen + 1);
     len = pct_decode(val, rawlen);
     if (len <= 0) {
         free(val);
-        *status = 400;
-        return send_error(c, 400, "bad percent escape in the value");
+        *err = "bad percent escape in the value";
+        return NULL;
     }
     s = enrich_reader_enter(rd);
     st = enrich_lookup(s, g_lookup_flags, val, (size_t)len, &res);
     o = result_native(s, k, val, (size_t)len, &res, st);
     enrich_reader_leave(rd);
     free(val);
-    *status = st < 0 ? 400 : 200;
-    return send_json(c, *status, o);
+    *status = o == NULL ? 500 : st < 0 ? 400 : 200;
+    return o;
 }
 
 /* Values of a POST body, looked up under the reader's current snapshot.
@@ -1141,28 +1156,28 @@ static unsigned batch_run(batch_t *b, struct json_object *v, const char **err) {
 }
 
 /* POST /v1/lookup {"values": [...]}. */
-static enum MHD_Result do_lookup_batch(struct MHD_Connection *c, const api_key_t *k, const req_t *rq,
-                                       unsigned *status, size_t *nvalues) {
+static struct json_object *resp_lookup_batch(const api_key_t *k, const char *body, size_t len, unsigned *status,
+                                             const char **err, size_t *nvalues) {
     batch_t b;
     struct json_object *v, *out = NULL, *arr = NULL;
-    const char *err = NULL;
     enrich_info_t info;
     memset(&b, 0, sizeof b);
-    b.body = parse_body(rq);
+    *status = 400;
+    b.body = parse_body(body, len);
     if (b.body == NULL) {
-        *status = 400;
-        return send_error(c, 400, "the body is not a JSON object");
+        *err = "the body is not a JSON object";
+        return NULL;
     }
     if (!json_object_object_get_ex(b.body, "values", &v) || v == NULL) {
         batch_free(&b);
-        *status = 400;
-        return send_error(c, 400, "values is required");
+        *err = "values is required";
+        return NULL;
     }
-    *status = batch_run(&b, v, &err);
+    *status = batch_run(&b, v, err);
     *nvalues = b.n;
     if (*status != 200) {
         batch_free(&b);
-        return send_error(c, *status, err);
+        return NULL;
     }
     out = json_object_new_object();
     arr = json_object_new_array();
@@ -1179,42 +1194,42 @@ static enum MHD_Result do_lookup_batch(struct MHD_Connection *c, const api_key_t
     }
     batch_free(&b);
     *status = out ? 200 : 500;
-    return send_json(c, *status, out);
+    return out;
 }
 
 /* POST /attributes/restSearch. The filter is "value" (a string or a list),
  * matched exactly; MISP wildcards and negation are refused instead of
  * missing silently. Other filters are ignored. */
-static enum MHD_Result do_misp(struct MHD_Connection *c, const api_key_t *k, const req_t *rq, unsigned *status,
-                               size_t *nvalues) {
+static struct json_object *resp_misp(const api_key_t *k, const char *body, size_t len, unsigned *status,
+                                     const char **err, size_t *nvalues) {
     batch_t b;
     struct json_object *req, *v, *fmt, *out = NULL, *resp = NULL, *attrs = NULL;
-    const char *err = NULL;
     enrich_info_t info;
     memset(&b, 0, sizeof b);
-    b.body = parse_body(rq);
+    *status = 400;
+    b.body = parse_body(body, len);
     if (b.body == NULL) {
-        *status = 400;
-        return send_error(c, 400, "the body is not a JSON object");
+        *err = "the body is not a JSON object";
+        return NULL;
     }
     req = b.body;
     if (json_object_object_get_ex(b.body, "request", &v) && v && json_object_is_type(v, json_type_object)) req = v;
     if (json_object_object_get_ex(req, "returnFormat", &fmt) && fmt &&
         (!json_object_is_type(fmt, json_type_string) || strcmp(json_object_get_string(fmt), "json") != 0)) {
         batch_free(&b);
-        *status = 400;
-        return send_error(c, 400, "returnFormat json is the only format");
+        *err = "returnFormat json is the only format";
+        return NULL;
     }
     if (!json_object_object_get_ex(req, "value", &v) || v == NULL) {
         batch_free(&b);
-        *status = 400;
-        return send_error(c, 400, "value is required");
+        *err = "value is required";
+        return NULL;
     }
-    *status = batch_run(&b, v, &err);
+    *status = batch_run(&b, v, err);
     *nvalues = b.n;
     if (*status != 200) {
         batch_free(&b);
-        return send_error(c, *status, err);
+        return NULL;
     }
     for (size_t i = 0; i < b.n; i++) {
         const char *x = b.vals[i].value;
@@ -1222,7 +1237,8 @@ static enum MHD_Result do_misp(struct MHD_Connection *c, const api_key_t *k, con
         if (l > 0 && (x[0] == '!' || x[0] == '%' || x[l - 1] == '%')) {
             batch_free(&b);
             *status = 400;
-            return send_error(c, 400, "wildcards and negation are not supported: values match exactly");
+            *err = "wildcards and negation are not supported: values match exactly";
+            return NULL;
         }
     }
     enrich_snap_info(b.s, &info);
@@ -1246,7 +1262,12 @@ static enum MHD_Result do_misp(struct MHD_Connection *c, const api_key_t *k, con
     }
     batch_free(&b);
     *status = out ? 200 : 500;
-    return send_json(c, *status, out);
+    return out;
+}
+
+static enum MHD_Result send_resp(struct MHD_Connection *c, unsigned status, struct json_object *o, const char *err) {
+    if (o == NULL && err != NULL) return send_error(c, status, err);
+    return send_json(c, status, o);
 }
 
 static int route_known(const char *url) {
@@ -1258,6 +1279,8 @@ static enum MHD_Result handler(void *cls, struct MHD_Connection *c, const char *
                                const char *version, const char *upload, size_t *upload_size, void **req_cls) {
     req_t *rq = *req_cls;
     api_key_t key;
+    struct json_object *o;
+    const char *err = NULL;
     unsigned status = 200;
     size_t nvalues = 0;
     int is_get, is_post;
@@ -1331,24 +1354,28 @@ static enum MHD_Result handler(void *cls, struct MHD_Connection *c, const char *
         return ret;
     }
     if (strncmp(url, "/v1/lookup/", 11) == 0 && is_get) {
-        ret = do_lookup_one(c, &key, url + 11, &status);
+        o = resp_lookup_one(&key, url + 11, &status, &err);
+        ret = send_resp(c, status, o, err);
         access_log(c, method, "/v1/lookup/", key.name, status, 1);
         return ret;
     }
     if (strcmp(url, "/v1/lookup") == 0 && is_get) {
         const char *q = MHD_lookup_connection_value(c, MHD_GET_ARGUMENT_KIND, "value");
-        ret = do_lookup_one(c, &key, q ? q : "", &status);
+        o = resp_lookup_one(&key, q ? q : "", &status, &err);
+        ret = send_resp(c, status, o, err);
         access_log(c, method, "/v1/lookup", key.name, status, 1);
         return ret;
     }
     if (strcmp(url, "/v1/lookup") == 0 && is_post) {
-        ret = do_lookup_batch(c, &key, rq, &status, &nvalues);
+        o = resp_lookup_batch(&key, rq->body, rq->len, &status, &err, &nvalues);
+        ret = send_resp(c, status, o, err);
         access_log(c, method, "/v1/lookup", key.name, status, nvalues);
         return ret;
     }
     if ((strcmp(url, "/attributes/restSearch") == 0 || strcmp(url, "/attributes/restSearch/json") == 0) &&
         is_post) {
-        ret = do_misp(c, &key, rq, &status, &nvalues);
+        o = resp_misp(&key, rq->body, rq->len, &status, &err, &nvalues);
+        ret = send_resp(c, status, o, err);
         access_log(c, method, "/attributes/restSearch", key.name, status, nvalues);
         return ret;
     }

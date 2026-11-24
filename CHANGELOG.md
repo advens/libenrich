@@ -10,6 +10,18 @@ The frozen surfaces are the C ABI and the on-disk `.thrt`, `.ovly`, and
 
 ## [Unreleased]
 
+### Added
+
+- `make fuzz-enrichd`: a libFuzzer harness for what enrichd does with a
+  lookup path, a `POST /v1/lookup` body and a MISP `restSearch` body,
+  under both a `tlp:clear` key and a `tlp:red,restricted,context` key,
+  and for the key file parser.
+
+### Fixed
+
+- enrichd answers 500, not 200 or 400, when it cannot build a single
+  lookup's response, and the access log records that status.
+
 ## [1.2.0] - 2026-11-23
 
 MINOR: `enrichd`, an optional HTTP lookup service over the library. The
