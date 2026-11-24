@@ -34,6 +34,9 @@ Within a major version the C API, the on-disk formats and enrichd's
 HTTP interface only grow; the manual's Compatibility section has the
 rules.
 
+[docs/bench](docs/bench/README.md) compares lookups against MaxMind DB,
+tinycdb, LMDB, Redis and an in-memory hash table on the same data.
+
 ## One command
 
 ```
