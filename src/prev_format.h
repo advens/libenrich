@@ -1,9 +1,10 @@
-/* prev_format.h: fleet-prevalence lookup table (mmap, read-only).
+/* prev_format.h: prevalence lookup table (mmap, read-only).
  *
- * How common an observable is across the fleet: a writer aggregates
- * per-observable counts and writes this table; readers map it read-only and
- * look up a query name or destination address per event. A low (or absent,
- * 0) count is the rarity signal a detection rule thresholds.
+ * How common an observable is across every reporting edge: a writer
+ * aggregates per-observable counts and writes this table; readers map it
+ * read-only and look up a query name or destination address per event. A
+ * low (or absent, 0) count is the rarity signal a detection rule
+ * thresholds.
  *
  * Only a 64-bit hash of each observable is stored, not the string, which
  * keeps an entry at 16 bytes and a lookup at one cache line. The hash is
@@ -61,12 +62,12 @@ typedef struct {
  * end-of-chain). */
 typedef struct {
     uint64_t hash_key; /* prev_hash_n() of the observable; 0 = empty slot */
-    uint32_t fleet_count; /* fleet-wide occurrence count */
-    uint16_t edge_count; /* distinct edges that reported it (fleet spread) */
+    uint32_t fleet_count; /* occurrence count across all edges */
+    uint16_t edge_count; /* distinct edges that reported it */
     uint16_t source_count; /* distinct internal sources that contacted it:
                             * the rarity metric that one host beaconing hard
                             * cannot inflate, and that still discriminates when
-                            * the fleet reports through a single edge. */
+                            * every event arrives through a single edge. */
 } prev_entry_t;
 
 /* The Python writer packs these exact sizes with '<' (LE, no padding). */
@@ -135,7 +136,7 @@ static __attribute__((unused)) uint64_t prev_hash(const uint64_t sip_key[2], con
     return prev_hash_n(sip_key, s, strlen(s));
 }
 
-/* Fleet count for a counted value under the table's header, or 0 if absent
+/* Occurrence count for a counted value under the table's header, or 0 if absent
  * (= rarest). edge_out / src_out (optional) receive the spreads, 0 on a miss.
  * The value need not be NUL-terminated. */
 static inline uint32_t prev_lookup_n(const prev_header_t* h, const prev_entry_t* table, uint32_t slots,

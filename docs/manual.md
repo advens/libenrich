@@ -177,9 +177,9 @@ not call the server. It compiles the file you already have.
 ## Sync
 
 `sync` talks only to the MISP feed. It does not download GeoIP, a
-STIX bundle, or a UA or suffix table. It does not copy a file, call
-Fleet, or write a second database. `output` stays the database named
-in the config.
+STIX bundle, or a UA or suffix table. It does not copy a file or
+write a second database. `output` stays the database named in the
+config.
 
 ```
 POST {url}/attributes/restSearch
@@ -856,6 +856,31 @@ failure. `ab` runs on one core, so these are floors.
 `make test-enrichd` starts `enrichd` on `testdata/api` and checks each
 grant, the bounds, the MISP search and a reload (`docs/check-enrichd.sh`,
 needs curl and python3).
+
+## Compatibility
+
+Releases are `MAJOR.MINOR.PATCH`. The shared library's SONAME is
+`libenrich.so.<MAJOR>`. Within one major version:
+
+- The C API only grows. A program built against an earlier 1.x
+  release runs against a later one. `enrich_options_t` starts with
+  its own size, so a release can append fields to it, and
+  `enrich_result_t` keeps two reserved words.
+- The `.thrt`, `.ovly` and `.prev` layouts do not change.
+- enrichd's routes, request bodies and response fields only grow. A
+  client ignores a field it does not know.
+
+A release that breaks one of those raises the major version, moves the
+SONAME, and says so at the top of its CHANGELOG section.
+
+A reader takes exactly the format version it was built for and refuses
+any other with an error that names the file. Nothing converts an old
+file: the three files are build outputs, so after a major upgrade
+`enrich build` writes the database and the overlay again from the
+feeds, and the writer of the `.prev` writes it again.
+
+`enrich_version()` returns the release. `ENRICH_VERSION_MAJOR`,
+`_MINOR` and `_PATCH` in `enrich.h` are not the release number.
 
 ## Not built here
 

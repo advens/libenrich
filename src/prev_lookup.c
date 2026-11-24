@@ -1,5 +1,5 @@
 /* prev_lookup.c
- * mmap a prevalence .prev table and print the fleet count for a key.
+ * mmap a prevalence .prev table and print the occurrence count for a key.
  *
  * Usage:   prev_lookup <file.prev> <observable>
  *

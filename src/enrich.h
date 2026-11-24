@@ -236,14 +236,14 @@ void enrich_event_fold(enrich_event_t *ev, const enrich_result_t *r);
  * a bad value.
  * ------------------------------------------------------------------------ */
 typedef struct {
-    uint32_t count;   /* fleet-wide occurrences */
+    uint32_t count;   /* occurrences across all reporting edges */
     uint16_t edges;   /* distinct reporting edges */
     uint16_t sources; /* distinct internal sources */
 } enrich_prev_t;
 
 int enrich_prevalence(const enrich_snap_t *s, const char *value, size_t len, enrich_prev_t *out);
 
-/* Fleet-wide reporting edges of the .prev; 0 when unknown, absent, or the
+/* Reporting edges behind the .prev; 0 when unknown, absent, or the
  * table is not warmed (count_max == 0). */
 uint32_t enrich_prev_reporting_edges(const enrich_snap_t *s);
 

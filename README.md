@@ -30,6 +30,10 @@ make install PREFIX=/usr/local
 
 `libfastjson` is required (`pkg-config libfastjson`).
 
+Within a major version the C API, the on-disk formats and enrichd's
+HTTP interface only grow; the manual's Compatibility section has the
+rules.
+
 ## One command
 
 ```
