@@ -4,6 +4,9 @@ on:
   pull_request:
   push:
     branches: [main]
+  schedule:
+    # Weekly long fuzz run; the other jobs run too.
+    - cron: "17 3 * * 1"
 
 permissions:
   contents: read
@@ -12,7 +15,7 @@ jobs:
   commit-msg:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
       - name: check commit messages
@@ -42,7 +45,7 @@ jobs:
         runner: [ubuntu-latest, ubuntu-24.04-arm]
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: deps
         run: sudo apt-get update -qq && sudo apt-get install -y -qq libfastjson-dev libmicrohttpd-dev pkg-config
       - name: make test
@@ -53,10 +56,78 @@ jobs:
   test-macos:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: deps
         run: brew install libfastjson libmicrohttpd pkg-config
       - name: make test
         run: make test
       - name: make test-enrichd
         run: make test-enrichd
+
+  # The API test under AddressSanitizer and UndefinedBehaviorSanitizer,
+  # then ThreadSanitizer, with both compilers on both arches.
+  sanitize:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+        cc: [gcc, clang]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: deps
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq clang libfastjson-dev pkg-config
+      - name: make test
+        run: make test
+      - name: make sanitize
+        run: make sanitize CC=${{ matrix.cc }}
+
+  # Every libFuzzer target: 60 s each on a pull request or a push,
+  # 20 min each on the weekly run. A crash fails the job and its input is
+  # kept as an artifact.
+  fuzz:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    env:
+      FUZZ_SECONDS: ${{ github.event_name == 'schedule' && '1200' || '60' }}
+      ASAN_OPTIONS: detect_leaks=1
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: deps
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq clang libfastjson-dev libmicrohttpd-dev pkg-config
+      - name: build
+        run: |
+          make test
+          make fuzz fuzz-enrichd FUZZ_CC=clang
+      - name: fuzz
+        run: |
+          set -eu
+          mkdir -p fuzz-out
+          run() {
+            name=$1
+            shift
+            mkdir -p "fuzz-out/corpus-$name"
+            echo "== $name"
+            "$@" -max_total_time="$FUZZ_SECONDS" -timeout=10 -rss_limit_mb=2048 \
+              -artifact_prefix="fuzz-out/$name-" "fuzz-out/corpus-$name" $SEEDS
+          }
+          SEEDS="" FUZZ_TARGET=thrt FUZZ_SEED=build/api/threat.thrt run thrt build/fuzz_enrich -max_len=64
+          mkdir -p fuzz-out/seed-ovly && cp build/api/site.ovly fuzz-out/seed-ovly/
+          SEEDS=fuzz-out/seed-ovly FUZZ_TARGET=ovly run ovly build/fuzz_enrich
+          SEEDS="" FUZZ_TARGET=prev run prev build/fuzz_enrich
+          SEEDS=testdata/fuzz/enrichd FUZZ_THRT=build/api/threat.thrt FUZZ_OVERLAY=build/api/site.ovly \
+            run enrichd build/fuzz_enrichd
+      - name: keep crashing inputs
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: fuzz-crashes-${{ matrix.runner }}
+          path: |
+            fuzz-out/*-crash-*
+            fuzz-out/*-leak-*
+            fuzz-out/*-timeout-*
+            fuzz-out/*-oom-*
+          if-no-files-found: ignore
