@@ -43,7 +43,7 @@ static int prev_insert(const prev_header_t* h,
         prev_entry_t* e = &table[idx];
         if (e->hash_key == 0 || e->hash_key == hash) {
             e->hash_key = hash;
-            e->fleet_count = count;
+            e->total_count = count;
             e->edge_count = edges;
             e->source_count = sources;
             return 0;

@@ -51,7 +51,7 @@ typedef struct {
     uint32_t checksum; /* optional CRC32C of entries; 0 = unset (map does not verify) */
     uint32_t epoch; /* build epoch seconds (staleness/telemetry) */
     uint64_t offset_entries; /* byte offset of the entry array */
-    uint32_t count_max; /* the largest fleet_count in the table (for scaling) */
+    uint32_t count_max; /* the largest total_count in the table (for scaling) */
     uint32_t reporting_edges; /* distinct edges in this rebuild; 0 = unknown */
     uint64_t sip_key[2]; /* SipHash-1-3 key of every hash_key in this file */
     uint32_t _reserved[4]; /* zero */
@@ -62,7 +62,12 @@ typedef struct {
  * end-of-chain). */
 typedef struct {
     uint64_t hash_key; /* prev_hash_n() of the observable; 0 = empty slot */
-    uint32_t fleet_count; /* occurrence count across all edges */
+    /* Occurrence count across all edges. fleet_count is a deprecated alias
+     * of total_count over the same bytes, removed at the next major version. */
+    __extension__ union {
+        uint32_t total_count;
+        uint32_t fleet_count __attribute__((deprecated("use total_count")));
+    };
     uint16_t edge_count; /* distinct edges that reported it */
     uint16_t source_count; /* distinct internal sources that contacted it:
                             * the rarity metric that one host beaconing hard
@@ -156,7 +161,7 @@ static inline uint32_t prev_lookup_n(const prev_header_t* h, const prev_entry_t*
         if (e->hash_key == hash) {
             if (edge_out) *edge_out = e->edge_count;
             if (src_out) *src_out = e->source_count;
-            return e->fleet_count;
+            return e->total_count;
         }
         idx = (idx + 1) & mask;
     }
