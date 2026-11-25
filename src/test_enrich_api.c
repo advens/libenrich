@@ -418,6 +418,49 @@ static void test_policy(void) {
         CHECK(hits == want && hits == 7);
     }
 
+    /* Across chunks, with misses and refused values between the hits. */
+    {
+        static const char *hit[] = {"198.51.100.10", "evil.example", "wl.example", "10.1.2.3",
+                                    "2001:db8::5",   "add.example",  "tag.example"};
+        enum { N = 200 };
+        static char miss[N][32];
+        enrich_value_t v[N];
+        enrich_result_t out[N];
+        int st[N];
+        size_t hits, want = 0;
+        int same = 1;
+        for (int i = 0; i < N; i++) {
+            const char *h = hit[(i / 9) % 7];
+            switch (i % 9) {
+            case 0:
+            case 3:
+            case 5:
+                v[i] = (enrich_value_t){h, strlen(h)};
+                break;
+            case 7:
+                v[i] = i % 2 ? (enrich_value_t){big, ENRICH_VALUE_MAX + 1} : (enrich_value_t){"evil\0.example", 13};
+                break;
+            case 8:
+                v[i] = (enrich_value_t){NULL, 3};
+                break;
+            default:
+                snprintf(miss[i], sizeof miss[i], "miss-%d.example", i);
+                v[i] = (enrich_value_t){miss[i], strlen(miss[i])};
+            }
+        }
+        hits = enrich_lookup_batch(s, ENRICH_OPT_SKIP_PRIVATE, v, N, out, st);
+        for (int i = 0; i < N; i++) {
+            int one = enrich_lookup(s, ENRICH_OPT_SKIP_PRIVATE, v[i].value, v[i].len, &res2);
+            if (one == 1) want++;
+            if (one != st[i] || memcmp(&res2, &out[i], sizeof res2) != 0) {
+                fprintf(stderr, "batch differs at %d: %d, one by one %d\n", i, st[i], one);
+                same = 0;
+            }
+        }
+        CHECK(same);
+        CHECK(hits == want && hits > 60);
+    }
+
     /* Event fold. */
     memset(&ev, 0, sizeof ev);
     lookup(s, 0, "198.51.100.10", &res);

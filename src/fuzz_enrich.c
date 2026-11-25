@@ -32,13 +32,26 @@ static char g_tmp[64];
 static const char *g_values[] = {"198.51.100.10", "10.1.2.3", "2001:db8::5", "evil.example", "wl.example",
                                  "add.example",   "tag.example", "0.0.0.0", "255.255.255.255", "::"};
 
+/* Look every value up one by one, then as one batch, and stop on any
+ * difference: the batch prefetches from the same file. */
 static void probe_thrt(thrt_db_t *d) {
+    enum { N = sizeof g_values / sizeof g_values[0] };
     struct enrich_snap s;
-    enrich_result_t r;
+    enrich_result_t r[N], rb[N];
+    enrich_value_t v[N];
+    int rc[N], st[N];
     memset(&s, 0, sizeof s);
     s.thrt = d;
-    for (size_t i = 0; i < sizeof g_values / sizeof g_values[0]; i++)
-        (void)enrich_lookup(&s, ENRICH_OPT_SKIP_PRIVATE, g_values[i], strlen(g_values[i]), &r);
+    for (size_t i = 0; i < N; i++) {
+        v[i] = (enrich_value_t){g_values[i], strlen(g_values[i])};
+        rc[i] = enrich_lookup(&s, ENRICH_OPT_SKIP_PRIVATE, v[i].value, v[i].len, &r[i]);
+    }
+    (void)enrich_lookup_batch(&s, ENRICH_OPT_SKIP_PRIVATE, v, N, rb, st);
+    for (size_t i = 0; i < N; i++)
+        if (st[i] != rc[i] || memcmp(&r[i], &rb[i], sizeof r[i]) != 0) {
+            fprintf(stderr, "fuzz_enrich: batch differs from one by one for %s\n", g_values[i]);
+            abort();
+        }
     for (unsigned i = 0; i < 64; i++) (void)enrich_feed_name(&s, i);
 }
 

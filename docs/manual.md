@@ -680,7 +680,11 @@ then the database. `ENRICH_OPT_SKIP_PRIVATE` drops the CTI parts of a
 private, loopback, link-local, CGNAT or ULA address and keeps its
 tags. Values are taken with their length, are never truncated, and
 are refused past 4096 bytes. `enrich_lookup_batch()` takes many values
-at once and prefetches the bloom filter. `enrich_event_fold()` sums the
+at once and gives the same answers as `enrich_lookup()` one by one. It
+works through them 64 at a time in stages (bloom bits, then hash
+slots, then strings and metadata rows) so the memory reads of the
+string values overlap; a batch of a few values gains little.
+`enrich_event_fold()` sums the
 fields of one event. `enrich_prevalence()` reads a `.prev`.
 
 The library reads `.thrt` version 5, overlay version 2 and `.prev`
