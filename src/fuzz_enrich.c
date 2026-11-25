@@ -118,7 +118,7 @@ static void fuzz_prev(const uint8_t *data, size_t size) {
         volatile uint32_t sink = 0;
         for (size_t i = 0; i < sizeof g_values / sizeof g_values[0]; i++)
             sink += prev_lookup_n(h, table, slots, g_values[i], strlen(g_values[i]), &edges, &srcs);
-        for (uint32_t i = 0; i < slots && i < 4096; i++) sink += table[i].fleet_count;
+        for (uint32_t i = 0; i < slots && i < 4096; i++) sink += table[i].total_count;
         (void)sink;
     }
     free(b);

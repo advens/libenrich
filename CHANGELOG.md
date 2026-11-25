@@ -16,6 +16,15 @@ The frozen surfaces are the C ABI and the on-disk `.thrt`, `.ovly`, and
   lookup path, a `POST /v1/lookup` body and a MISP `restSearch` body,
   under both a `tlp:clear` key and a `tlp:red,restricted,context` key,
   and for the key file parser.
+- `prev_entry_t.total_count` in `prev_format.h`, the occurrence count
+  of a `.prev` entry.
+
+### Deprecated
+
+- `prev_entry_t.fleet_count`, an alias of `total_count` over the same
+  bytes. Code that uses it still builds, with a deprecation warning.
+  It is removed at the next major version. The entry layout and the
+  `.prev` format do not change.
 
 ### Changed
 

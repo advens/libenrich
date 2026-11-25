@@ -249,7 +249,7 @@ static int write_prev(const char *path) {
     h = prev_hash(f.h.sip_key, "common.example");
     idx = (uint32_t)h & 7u;
     f.e[idx].hash_key = h;
-    f.e[idx].fleet_count = 500;
+    f.e[idx].total_count = 500;
     f.e[idx].edge_count = 3;
     f.e[idx].source_count = 40;
     fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
