@@ -815,6 +815,54 @@ int enrich_lookup(const enrich_snap_t *s, uint32_t opt_flags, const char *value,
     return resolve(s, opt_flags, value, len, &q, out);
 }
 
+/* A string lookup is a chain of dependent reads: the bloom bits, the
+ * home slot, the pool string, the metadata row. One value at a time
+ * waits for each read in turn. The batch walks a chunk in stages so the
+ * reads of every string in the chunk are in flight together. Most
+ * values are misses and most misses fail the first bloom probe, so the
+ * classify pass fetches only that probe's line. The pass below fetches
+ * the other two probes and the home slot of each value that passes it,
+ * and the next one the string and metadata row that slot names.
+ * resolve() then reads from cache and gives the answer enrich_lookup()
+ * gives. Every prefetched address is inside the mapping: the bounds
+ * resolve() relies on are checked before the address is formed. */
+static inline int batch_string(const query_t *q, int rc) {
+    return rc == ENRICH_OK && q->kind == ENRICH_KIND_STRING;
+}
+
+static void batch_prefetch(const thrt_db_t *d, const enrich_value_t *v, const query_t *q, const int *qrc,
+                           size_t m) {
+    uint32_t slot_mask = d->hdr->hash_slots - 1, bm = d->bloom_mask;
+    uint8_t want[BATCH_CHUNK];
+
+    for (size_t i = 0; i < m; i++) {
+        uint32_t h1, h2, b;
+        want[i] = (uint8_t)batch_string(&q[i], qrc[i]);
+        if (!want[i] || d->bloom == NULL) continue;
+        h1 = (uint32_t)q[i].hash;
+        b = h1 & bm;
+        if (!(d->bloom[b >> 3] & (1u << (b & 7)))) {
+            want[i] = 0;
+            continue;
+        }
+        h2 = thrt_bloom_h2(h1);
+        PREFETCH(&d->bloom[((h1 + h2) & bm) >> 3]);
+        PREFETCH(&d->bloom[((h1 + (h2 << 1)) & bm) >> 3]);
+        PREFETCH(&d->ht[h1 & slot_mask]);
+    }
+    for (size_t i = 0; i < m; i++) {
+        const thrt_hash_entry_t *e;
+        if (!want[i] || (d->bloom != NULL && !bloom_maybe(d, q[i].hash))) continue;
+        e = &d->ht[(uint32_t)q[i].hash & slot_mask];
+        if (e->meta_idx == 0xFFFFFFFFu || e->hash_key != q[i].hash) continue;
+        if (e->string_offset < d->pool_size && v[i].len < d->pool_size - e->string_offset) {
+            PREFETCH(d->pool + e->string_offset);
+            PREFETCH(d->pool + e->string_offset + v[i].len);
+        }
+        if (e->meta_idx < d->hdr->metadata_count) PREFETCH(&d->meta[e->meta_idx]);
+    }
+}
+
 size_t enrich_lookup_batch(const enrich_snap_t *s, uint32_t opt_flags, const enrich_value_t *v, size_t n,
                            enrich_result_t *out, int *status) {
     query_t q[BATCH_CHUNK];
@@ -827,11 +875,13 @@ size_t enrich_lookup_batch(const enrich_snap_t *s, uint32_t opt_flags, const enr
         size_t m = n - base < BATCH_CHUNK ? n - base : BATCH_CHUNK;
         for (size_t i = 0; i < m; i++) {
             qrc[i] = classify(v[base + i].value, v[base + i].len, &q[i]);
-            if (qrc[i] == ENRICH_OK && q[i].kind == ENRICH_KIND_STRING && d && d->bloom) {
-                uint32_t bit = (uint32_t)q[i].hash & d->bloom_mask;
-                PREFETCH(&d->bloom[bit >> 3]);
-            }
+            if (d == NULL || !batch_string(&q[i], qrc[i])) continue;
+            if (d->bloom != NULL)
+                PREFETCH(&d->bloom[((uint32_t)q[i].hash & d->bloom_mask) >> 3]);
+            else
+                PREFETCH(&d->ht[(uint32_t)q[i].hash & (d->hdr->hash_slots - 1)]);
         }
+        if (d != NULL) batch_prefetch(d, v + base, q, qrc, m);
         for (size_t i = 0; i < m; i++) {
             int rc = qrc[i];
             if (rc == ENRICH_OK)

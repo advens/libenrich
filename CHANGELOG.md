@@ -17,6 +17,14 @@ The frozen surfaces are the C ABI and the on-disk `.thrt`, `.ovly`, and
   under both a `tlp:clear` key and a `tlp:red,restricted,context` key,
   and for the key file parser.
 
+### Changed
+
+- `enrich_lookup_batch()` prefetches the hash slot, the stored string
+  and the metadata row of every string value in a chunk that passes
+  the bloom filter, not only one bloom byte, so their memory reads
+  overlap. Answers are unchanged; the fuzzer now checks the batch
+  against one-by-one lookups.
+
 ### Fixed
 
 - enrichd answers 500, not 200 or 400, when it cannot build a single
