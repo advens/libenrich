@@ -10,6 +10,13 @@ The frozen surfaces are the C ABI and the on-disk `.thrt`, `.ovly`, and
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-11-25
+
+MINOR: string batches read memory in parallel, and the `.prev` entry
+count is `total_count`, with `fleet_count` kept as a deprecated alias.
+The C ABI, the SONAME (`libenrich.so.1`) and the on-disk formats are
+unchanged.
+
 ### Added
 
 - `make fuzz-enrichd`: a libFuzzer harness for what enrichd does with a
